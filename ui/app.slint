@@ -1,0 +1,73 @@
+import { Theme, UISize, ButtonStyleProps, ButtonSizeProps, ButtonVariant, ButtonState, ButtonSize } from "@ui/theme.slint";
+import { Callbacks } from "callbacks.slint";
+import { Button } from "@ui/button.slint";
+import { Card } from "@ui/card.slint";
+
+export { Callbacks, Theme, ButtonStyleProps, ButtonSizeProps, ButtonVariant, ButtonState, ButtonSize }
+
+component PrimaryAction inherits Button {
+    background: Theme.palette-primary;
+    foreground: #ffffff;
+    border-color: transparent;
+    border-width: 0px;
+    font-weight: 600;
+    font-family: "Montserrat";
+    button-opacity: self.disabled ? 0.5 : 1.0;
+    touch-expansion: 4px;
+    font-size: 24px;
+    padding-horizontal: 24px;
+    padding-vertical: 12px;
+    icon-size: 24px;
+    border-radius: 24px;
+}
+
+export component AppWindow inherits Window {
+    title: "prime-pdf-viewer";
+    preferred-width: 480px;
+    preferred-height: 800px;
+    background: Theme.palette-background;
+
+    Rectangle {
+        width: parent.width;
+        height: parent.height;
+        background: Theme.palette-background;
+
+        VerticalLayout {
+            width: parent.width;
+            height: parent.height;
+            padding-left: 24px;
+            padding-right: 24px;
+            padding-top: 32px + UISize.control-center-status-bar-height;
+            padding-bottom: 24px;
+            spacing: 20px;
+
+            Text {
+                text: "prime-pdf-viewer";
+                color: Theme.palette-muted;
+                font-family: "Montserrat";
+                font-size: 18px;
+                font-weight: 600;
+                horizontal-alignment: center;
+            }
+
+            Card {
+                width: 100%;
+                title: "Ready to build";
+                body: "This starter app uses the synced shared SDK component surface.";
+                footer: "This template now uses the synced public SDK surface.";
+            }
+
+            Rectangle {
+                vertical-stretch: 1;
+            }
+
+            PrimaryAction {
+                width: 100%;
+                text: "Log a message";
+                clicked => {
+                    Callbacks.button-clicked();
+                }
+            }
+        }
+    }
+}

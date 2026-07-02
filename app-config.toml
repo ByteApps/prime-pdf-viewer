@@ -1,0 +1,17 @@
+# Foundation application configuration
+app-name = "prime-pdf-viewer"
+friendly-app-name = "PDF Viewer"
+launcher-app-name = "PDF Viewer"
+description = "Browse Internal, Airlock and USB storage and view PDF files, rendered on-device."
+icon = "resources/icon.svg"
+app-id = "0x500f4aa9605cbe18b05bd764a815b873"
+version = "0.1.0"
+min-keyos-version = "1.0.0"
+
+[publisher]
+name = ""
+contact-email = ""
+support-url = ""
+
+[permissions]
+template = ["gui-app"]

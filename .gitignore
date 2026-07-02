@@ -1,0 +1,4 @@
+target/
+ui/ui
+resources
+manifest.toml
