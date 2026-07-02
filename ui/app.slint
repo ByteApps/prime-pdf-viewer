@@ -1,28 +1,239 @@
-import { Theme, UISize, ButtonStyleProps, ButtonSizeProps, ButtonVariant, ButtonState, ButtonSize } from "@ui/theme.slint";
-import { Callbacks } from "callbacks.slint";
-import { Button } from "@ui/button.slint";
-import { Card } from "@ui/card.slint";
+import { Theme, UISize } from "@ui/theme.slint";
+import { Callbacks, Browser, Viewer, Ui, FileRow } from "callbacks.slint";
+import { Icon } from "@ui/icon.slint";
+import { SegmentedControl } from "@ui/segmented_control.slint";
 
-export { Callbacks, Theme, ButtonStyleProps, ButtonSizeProps, ButtonVariant, ButtonState, ButtonSize }
+export { Callbacks, Browser, Viewer, Ui, FileRow, Theme }
 
-component PrimaryAction inherits Button {
-    background: Theme.palette-primary;
-    foreground: #ffffff;
-    border-color: transparent;
-    border-width: 0px;
-    font-weight: 600;
-    font-family: "Montserrat";
-    button-opacity: self.disabled ? 0.5 : 1.0;
-    touch-expansion: 4px;
-    font-size: 24px;
-    padding-horizontal: 24px;
-    padding-vertical: 12px;
-    icon-size: 24px;
-    border-radius: 24px;
+// A round icon button built from a raw TouchArea. The SDK IconButton sizes its
+// touch area to a fixed control-size rather than the laid-out size, so its
+// clicks don't register once a layout gives it a different size — a plain
+// TouchArea is reliable (same as prime-text-editor).
+component IconBtn inherits Rectangle {
+    in property <image> icon;
+    in property <color> icon-color: Theme.palette-foreground;
+    in property <length> diameter: 44px;
+    in property <bool> enabled: true;
+    callback clicked();
+
+    width: diameter;
+    height: diameter;
+    border-radius: diameter / 2;
+    opacity: enabled ? 1.0 : 0.35;
+    background: touch.pressed
+        ? Theme.palette-secondary-pressed
+        : (touch.has-hover ? Theme.palette-secondary : Theme.palette-secondary.with-alpha(0.4));
+
+    touch := TouchArea {
+        enabled: root.enabled;
+        clicked => {
+            root.clicked();
+        }
+    }
+    Icon {
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        width: root.diameter * 0.5;
+        icon: root.icon;
+        icon-color: root.icon-color;
+    }
+}
+
+// A single row in the file list. Explicit geometry (not a HorizontalLayout)
+// for reliable vertical centering, as in prime-text-editor.
+component FileEntry inherits Rectangle {
+    in property <FileRow> entry;
+    height: 60px;
+    background: touch.has-hover ? Theme.palette-secondary : transparent;
+
+    Image {
+        x: 12px;
+        y: (parent.height - self.height) / 2;
+        width: 24px;
+        height: 24px;
+        source: root.entry.is-folder ? @image-url("icons/folder.svg") : @image-url("icons/file.svg");
+        colorize: root.entry.is-folder ? Theme.palette-primary : Theme.palette-foreground;
+    }
+
+    touch := TouchArea {
+        x: 48px;
+        y: 0px;
+        width: parent.width - 48px;
+        height: parent.height;
+        clicked => {
+            Callbacks.entry-activated(root.entry.name, root.entry.is-folder);
+        }
+        VerticalLayout {
+            alignment: center;
+            Text {
+                text: root.entry.name;
+                color: Theme.palette-foreground;
+                font-family: "Montserrat";
+                font-size: 18px;
+                overflow: elide;
+            }
+            Text {
+                text: root.entry.info;
+                color: Theme.palette-muted;
+                font-family: "Montserrat";
+                font-size: 13px;
+            }
+        }
+    }
+
+    Rectangle {
+        y: parent.height - 1px;
+        height: 1px;
+        background: Theme.palette-border;
+    }
+}
+
+// The browse screen: storage tabs, path row, scrollable list of folders + PDFs.
+component BrowserView inherits VerticalLayout {
+    spacing: 12px;
+
+    HorizontalLayout {
+        // Match the SegmentedControl's natural height (md control 56 + 2×4 list
+        // padding = 64) so the tabs render fully.
+        height: 64px;
+        SegmentedControl {
+            horizontal-stretch: 1;
+            options: ["Internal", "Airlock", "USB"];
+            selected-index <=> Browser.location-index;
+            changed(idx, label) => {
+                Callbacks.location-changed(idx);
+            }
+        }
+    }
+
+    HorizontalLayout {
+        spacing: 8px;
+        height: 48px;
+
+        if !Browser.at-root: IconBtn {
+            icon: @image-url("icons/arrow-left.svg");
+            clicked => {
+                Callbacks.go-back();
+            }
+        }
+        Text {
+            vertical-alignment: center;
+            horizontal-stretch: 1;
+            text: Browser.path;
+            color: Theme.palette-muted;
+            font-family: "Montserrat";
+            font-size: 15px;
+            overflow: elide;
+        }
+    }
+
+    if Ui.message != "": Text {
+        text: Ui.message;
+        color: Ui.message-error ? Theme.palette-danger : Theme.palette-primary;
+        font-family: "Montserrat";
+        font-size: 14px;
+        wrap: word-wrap;
+    }
+    if Browser.status != "": Text {
+        text: Browser.status;
+        color: Theme.palette-muted;
+        font-family: "Montserrat";
+        font-size: 16px;
+        horizontal-alignment: center;
+    }
+    if Browser.status == "" && Browser.entries.length == 0: Text {
+        text: "No PDF files here";
+        color: Theme.palette-muted;
+        font-family: "Montserrat";
+        font-size: 16px;
+        horizontal-alignment: center;
+    }
+
+    Flickable {
+        vertical-stretch: 1;
+        viewport-height: Browser.entries.length * 60px;
+        VerticalLayout {
+            alignment: start;
+            spacing: 0px;
+            for item in Browser.entries: FileEntry {
+                entry: item;
+            }
+        }
+    }
+}
+
+// The page-viewer screen: header (back / name + page indicator / prev / next)
+// above a vertically pannable rendered page. Explicit geometry keeps the
+// header pinned so the Flickable can never overlap its buttons.
+component ViewerView inherits Rectangle {
+    HorizontalLayout {
+        x: 0;
+        y: 0;
+        width: parent.width;
+        height: 56px;
+        spacing: 8px;
+
+        IconBtn {
+            icon: @image-url("icons/arrow-left.svg");
+            clicked => {
+                Callbacks.close-viewer();
+            }
+        }
+        VerticalLayout {
+            horizontal-stretch: 1;
+            alignment: center;
+            Text {
+                text: Viewer.doc-name;
+                color: Theme.palette-foreground;
+                font-family: "Montserrat";
+                font-size: 17px;
+                font-weight: 600;
+                overflow: elide;
+            }
+            Text {
+                text: "Page " + Viewer.page-num + "/" + Viewer.page-count;
+                color: Theme.palette-muted;
+                font-family: "Montserrat";
+                font-size: 13px;
+            }
+        }
+        IconBtn {
+            icon: @image-url("icons/chevron-left.svg");
+            enabled: Viewer.page-num > 1;
+            clicked => {
+                Callbacks.prev-page();
+            }
+        }
+        IconBtn {
+            icon: @image-url("icons/chevron-right.svg");
+            enabled: Viewer.page-num < Viewer.page-count;
+            clicked => {
+                Callbacks.next-page();
+            }
+        }
+    }
+
+    Flickable {
+        x: 0;
+        y: 68px;
+        width: parent.width;
+        height: parent.height - 68px;
+        viewport-width: self.width;
+        viewport-height: max(self.height, Viewer.page-h);
+
+        Image {
+            x: 0;
+            y: 0;
+            width: parent.width;
+            height: Viewer.page-h;
+            source: Viewer.page-img;
+            image-fit: fill;
+        }
+    }
 }
 
 export component AppWindow inherits Window {
-    title: "prime-pdf-viewer";
+    title: "PDF Viewer";
     preferred-width: 480px;
     preferred-height: 800px;
     background: Theme.palette-background;
@@ -33,41 +244,13 @@ export component AppWindow inherits Window {
         background: Theme.palette-background;
 
         VerticalLayout {
-            width: parent.width;
-            height: parent.height;
-            padding-left: 24px;
-            padding-right: 24px;
-            padding-top: 32px + UISize.control-center-status-bar-height;
-            padding-bottom: 24px;
-            spacing: 20px;
+            padding-left: 20px;
+            padding-right: 20px;
+            padding-top: 24px + UISize.control-center-status-bar-height;
+            padding-bottom: 20px;
 
-            Text {
-                text: "prime-pdf-viewer";
-                color: Theme.palette-muted;
-                font-family: "Montserrat";
-                font-size: 18px;
-                font-weight: 600;
-                horizontal-alignment: center;
-            }
-
-            Card {
-                width: 100%;
-                title: "Ready to build";
-                body: "This starter app uses the synced shared SDK component surface.";
-                footer: "This template now uses the synced public SDK surface.";
-            }
-
-            Rectangle {
-                vertical-stretch: 1;
-            }
-
-            PrimaryAction {
-                width: 100%;
-                text: "Log a message";
-                clicked => {
-                    Callbacks.button-clicked();
-                }
-            }
+            if !Ui.viewing: BrowserView {}
+            if Ui.viewing: ViewerView {}
         }
     }
 }

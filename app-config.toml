@@ -14,4 +14,4 @@ contact-email = ""
 support-url = ""
 
 [permissions]
-template = ["gui-app"]
+template = ["gui-app", "fs-read", "fs-access-read"]

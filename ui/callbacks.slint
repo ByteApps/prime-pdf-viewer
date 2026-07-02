@@ -1,3 +1,43 @@
+// One row in the file browser list.
+export struct FileRow {
+    name: string,
+    info: string,      // human size, or "Folder"
+    is-folder: bool,
+}
+
+// State of the browser screen, driven from Rust.
+export global Browser {
+    in property <[FileRow]> entries;
+    in property <string> path: "/";
+    in property <bool> at-root: true;
+    // Which storage tab is active: 0 = Internal (User), 1 = Airlock, 2 = USB.
+    in-out property <int> location-index: 0;
+    // Non-empty when the current location can't be listed (e.g. USB not connected).
+    in property <string> status: "";
+}
+
+// State of the page-viewer screen, driven from Rust.
+export global Viewer {
+    in property <image> page-img;
+    in property <int> page-num: 0;       // 1-based
+    in property <int> page-count: 0;
+    in property <string> doc-name: "";
+    in property <length> page-h: 0px;    // rendered page height (logical px)
+}
+
+// Transient UI state: which screen is showing, and the info/error banner.
+export global Ui {
+    in-out property <bool> viewing: false;   // false = browser, true = page viewer
+    in property <string> message: "";        // transient info/error banner
+    in property <bool> message-error: false; // true = error (red), false = info
+}
+
+// Callbacks bridged to Rust in main.rs.
 export global Callbacks {
-    callback button-clicked();
+    callback location-changed(int);           // tab index
+    callback entry-activated(string, bool);   // name, is-folder -> descend or open
+    callback go-back();
+    callback close-viewer();
+    callback prev-page();
+    callback next-page();
 }

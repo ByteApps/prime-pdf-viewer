@@ -7,6 +7,9 @@ edition = "2021"
 
 [dependencies]
 log = "0.4"
+# Pure-Rust PDF rasterizer. Pinned: newer hayro requires rustc >= 1.92, but the
+# SDK Nix shell pins nightly-2025-09-11 (1.91). Don't bump until the toolchain moves.
+hayro = "=0.4.0"
 log-server = { package = "xous-api-log", path = "/Users/user/.foundation/sdk/current/lib/keyos/xous/api/log" }
 server = { path = "/Users/user/.foundation/sdk/current/lib/keyos/server" }
 slint-keyos-platform = { path = "/Users/user/.foundation/sdk/current/lib/keyos/slint-keyos-platform/runtime" }
