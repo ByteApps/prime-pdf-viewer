@@ -5,11 +5,9 @@
 Manuals, statements, backup instructions — sometimes the document you need is a PDF, and the safest place to read it is a device that can't leak it. PDF Viewer browses your Prime's Internal, Airlock, and USB storage, opens any PDF with a tap, and pages through it rendered right on the device. No cloud, no companion app, and no write access: it can look at your files but never touch them.
 
 <p align="center">
-  <img src="screenshots/browser.png" alt="File browser" width="280">
-  &nbsp;
-  <img src="screenshots/page1.png" alt="Page view" width="280">
-  &nbsp;
-  <img src="screenshots/error-not-a-pdf.png" alt="Error handling" width="280">
+  <img src="screenshots/page.png" alt="Page view" width="300">
+  &nbsp;&nbsp;
+  <img src="screenshots/browser.png" alt="File browser" width="300">
 </p>
 
 ## Features
