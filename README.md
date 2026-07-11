@@ -1,4 +1,4 @@
-# PDF Viewer — a Passport Prime app
+# <img src="resources/icon.svg" alt="" width="42" align="top" /> PDF Viewer — a Passport Prime app
 
 A read-only PDF viewer for Foundation's **Passport Prime**, built as a Rust
 binary with a **Slint** UI on **KeyOS** (Foundation's Rust microkernel on
