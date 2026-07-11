@@ -1,9 +1,8 @@
-# <img src="resources/icon.svg" alt="" width="42" align="top" /> PDF Viewer — a Passport Prime app
+# <img src="resources/icon.svg" alt="" width="42" align="top" /> PDF Viewer
 
-A read-only PDF viewer for Foundation's **Passport Prime**, built as a Rust
-binary with a **Slint** UI on **KeyOS** (Foundation's Rust microkernel on
-Xous). Browse Internal / Airlock / USB storage, tap a PDF, and page through
-it rendered on-device — no cloud, no write access.
+**Productivity · Documents** — read PDFs on your Passport Prime, rendered entirely on-device.
+
+Manuals, statements, backup instructions — sometimes the document you need is a PDF, and the safest place to read it is a device that can't leak it. PDF Viewer browses your Prime's Internal, Airlock, and USB storage, opens any PDF with a tap, and pages through it rendered right on the device. No cloud, no companion app, and no write access: it can look at your files but never touch them.
 
 <p align="center">
   <img src="screenshots/browser.png" alt="File browser" width="280">
@@ -13,39 +12,29 @@ it rendered on-device — no cloud, no write access.
   <img src="screenshots/error-not-a-pdf.png" alt="Error handling" width="280">
 </p>
 
-## Details
+## Features
 
-- **Rendering**: [hayro](https://github.com/LaurenzV/hayro) 0.4 (pure Rust)
-  rasterizes each page fit-to-width; displayed via Slint `Image` from a shared
-  pixel buffer.
-- **Permissions**: read-only file access (`fs-read` + `fs-access-read`
-  templates) — the signed manifest contains no write grants.
-- **Testing**: driven end-to-end in the hosted simulator by
-  `../ui-automation/tests/view-pdf.sh` (CoreGraphics taps + log assertions).
+- **All three storage locations** — Internal, Airlock, and USB, with folder navigation; the list shows just folders and PDFs.
+- **Fit-to-width pages** — each page rendered on-device, with previous/next buttons and drag-panning for tall pages.
+- **Strictly read-only** — the app's signed permission manifest contains no write grants at all; it cannot modify, create, or delete anything.
+- **Graceful with bad files** — a corrupt or mislabeled PDF shows a clear error banner and the app keeps running.
+- **Offline by design** — Prime has no network stack; documents never leave the device.
 
-## Build & run
+## Get it running
 
-Requires the `foundation` CLI (on `PATH` at `~/.foundation/sdk/bin`) and Nix.
-In a non-login shell, source Nix first:
+With the Foundation SDK installed, build and launch in the simulator with:
 
 ```bash
-. '/nix/var/nix/profiles/default/etc/profile.d/nix-daemon.sh'
-export PATH="$HOME/.foundation/sdk/bin:$PATH"
+foundation sim
 ```
 
-Then, from this directory (via the SDK's Nix dev shell):
+See **[DEVELOPMENT.md](DEVELOPMENT.md)** for environment setup, hardware builds, rendering internals, and testing.
 
-```bash
-nix develop ~/.foundation/sdk/current --command foundation sim     # hosted simulator
-nix develop ~/.foundation/sdk/current --command foundation build   # compile + sign a hardware bundle
-```
+## Learn more
 
-> **Hardware sideload** (`foundation sideload`) is **not** possible on a retail
-> Prime — it needs dev firmware from Foundation. The simulator is the
-> verification target. See `NOTES.md`.
-
-See `CLAUDE.md` for architecture and the hayro version pin rationale, and
-`NOTES.md` for verified build/sim output and simulator gotchas.
+- [DEVELOPMENT.md](DEVELOPMENT.md) — building, running, rendering pipeline, permissions, and testing
+- [THIRD-PARTY.md](THIRD-PARTY.md) — libraries this app is built on
+- [NOTES.md](NOTES.md) — verified build/sim output and simulator gotchas
 
 ## License & disclaimer
 
