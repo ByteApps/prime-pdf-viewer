@@ -26,13 +26,9 @@ With the Foundation SDK installed, build and launch in the simulator with:
 foundation sim
 ```
 
-See **[DEVELOPMENT.md](DEVELOPMENT.md)** for environment setup, hardware builds, rendering internals, and testing.
-
 ## Learn more
 
-- [DEVELOPMENT.md](DEVELOPMENT.md) — building, running, rendering pipeline, permissions, and testing
 - [THIRD-PARTY.md](THIRD-PARTY.md) — libraries this app is built on
-- [NOTES.md](NOTES.md) — verified build/sim output and simulator gotchas
 
 ## Support
 

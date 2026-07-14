@@ -3,3 +3,8 @@ ui/ui
 resources/*
 !resources/icon.svg
 manifest.toml
+
+# Internal docs kept in the private workspace companion (prime/private/prime-pdf-viewer)
+CLAUDE.md
+DEVELOPMENT.md
+NOTES.md
