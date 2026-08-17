@@ -4,7 +4,7 @@
 // the renderer will draw this image much smaller than its native size — see
 // `try_scaled_decode` below. On any error or unmet precondition it falls
 // through to the original zune-jpeg path unchanged, so a file the old code
-// decoded correctly can never start failing. Not upstreamed yet.
+// decoded correctly can never start failing. Upstream PR: LaurenzV/hayro#1353.
 use crate::object::Dict;
 use crate::object::dict::keys::COLOR_TRANSFORM;
 use crate::object::stream::{FilterResult, ImageColorSpace, ImageData, ImageDecodeParams};

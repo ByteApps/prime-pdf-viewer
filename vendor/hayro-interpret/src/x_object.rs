@@ -20,7 +20,7 @@
 // `target_dimension: None`, or when the image is already within 2x of the
 // target (mirroring the DCT patch's own >=2x precondition, which leaves a
 // margin of headroom above the drawn size), this is a no-op: no
-// reallocation, no scale_factors change. Not upstreamed yet.
+// reallocation, no scale_factors change. Upstream PR: LaurenzV/hayro#1353.
 use crate::cache::Cache;
 use crate::color::{ColorComponents, ColorSpace, ToRgb};
 use crate::context::Context;
