@@ -37,6 +37,13 @@ const MAX_PAGE_HEIGHT: f32 = 4096.0;
 /// all cheap: 290 of that manual's 291 pages need ~8 MB.
 const MAX_PDF_BYTES: u64 = 16 * 1024 * 1024;
 
+/// Delay before a deferred open/page-turn runs, so the loading-overlay frame
+/// actually paints first. 0 ms fires on the next event-loop iteration BEFORE
+/// the renderer commits a frame (verified optically in the sim on the image
+/// viewer: the screen kept the pre-tap frame through a 10 s decode). 50 ms +
+/// an explicit `request_redraw()` gives the renderer a window.
+const LOADING_DEFER_MS: u64 = 50;
+
 /// Mutable app state shared across the UI callbacks.
 struct State {
     location: Location,
@@ -193,7 +200,8 @@ fn app_main(cx: AppContext, ui: AppWindow) {
             let ui_weak = ui_weak.clone();
             let state = state.clone();
             let name = name.clone();
-            Timer::single_shot(Duration::from_millis(0), move || {
+            ui.window().request_redraw();
+            Timer::single_shot(Duration::from_millis(LOADING_DEFER_MS), move || {
                 let Some(ui) = ui_weak.upgrade() else { return };
 
                 let finish = |ui: &AppWindow, state: &Rc<RefCell<State>>| {
@@ -314,7 +322,8 @@ fn app_main(cx: AppContext, ui: AppWindow) {
 
             let ui_weak = ui_weak.clone();
             let state = state.clone();
-            Timer::single_shot(Duration::from_millis(0), move || {
+            ui.window().request_redraw();
+            Timer::single_shot(Duration::from_millis(LOADING_DEFER_MS), move || {
                 let Some(ui) = ui_weak.upgrade() else { return };
                 {
                     let mut s = state.borrow_mut();
@@ -351,7 +360,8 @@ fn app_main(cx: AppContext, ui: AppWindow) {
 
             let ui_weak = ui_weak.clone();
             let state = state.clone();
-            Timer::single_shot(Duration::from_millis(0), move || {
+            ui.window().request_redraw();
+            Timer::single_shot(Duration::from_millis(LOADING_DEFER_MS), move || {
                 let Some(ui) = ui_weak.upgrade() else { return };
                 {
                     let mut s = state.borrow_mut();
