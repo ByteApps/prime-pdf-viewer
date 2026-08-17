@@ -4,6 +4,7 @@ use std::cell::RefCell;
 use std::io::Read;
 use std::rc::Rc;
 use std::sync::Arc;
+use std::time::Duration;
 
 use hayro::hayro_interpret::hayro_syntax::object::{Dict, Stream};
 use hayro::hayro_interpret::hayro_syntax::page::Page;
@@ -14,7 +15,7 @@ use hayro::{render, RenderCache, RenderSettings};
 use slint_keyos_platform::app_ui2;
 use slint_keyos_platform::fs::{self, Location, OpenFlags};
 use slint_keyos_platform::slint::{
-    ComponentHandle, Image, ModelRc, Rgba8Pixel, SharedPixelBuffer, VecModel,
+    ComponentHandle, Image, ModelRc, Rgba8Pixel, SharedPixelBuffer, Timer, VecModel,
 };
 
 app_ui2!("PDF Viewer");
@@ -52,6 +53,10 @@ struct State {
     page_count: usize,
     page_idx: usize,       // 0-based index of the page on screen
     doc_name: String,
+    /// True while a deferred open/page-turn is in flight. Guards against a
+    /// repeated tap re-entering the (slow, synchronous-once-it-starts) work
+    /// and queuing up; see the loading overlay in ui/app.slint.
+    busy: bool,
 }
 
 fn app_main(cx: AppContext, ui: AppWindow) {
@@ -69,6 +74,7 @@ fn app_main(cx: AppContext, ui: AppWindow) {
         page_count: 0,
         page_idx: 0,
         doc_name: String::new(),
+        busy: false,
     }));
 
     // Re-list the current directory (folders + .pdf files) into the Browser global.
@@ -170,52 +176,81 @@ fn app_main(cx: AppContext, ui: AppWindow) {
                 return;
             }
 
+            if state.borrow().busy {
+                return;
+            }
+
             log::info!("cb: open-pdf {name}");
-            let bytes = match read_bytes(&fs, &full, loc) {
-                Ok(b) => b,
-                Err(msg) => {
-                    show_error(&ui, msg);
-                    return;
-                }
-            };
-            let data = Arc::new(bytes);
-            match Pdf::new(data.clone()) {
-                Ok(pdf) => {
-                    let page_count = pdf.pages().len();
-                    if page_count == 0 {
-                        show_error(&ui, "This PDF has no pages".to_string());
+            state.borrow_mut().busy = true;
+            let u = ui.global::<Ui>();
+            u.set_loading(true);
+            u.set_loading_text(format!("Opening {name}…").into());
+            log::info!("loading: {name}");
+
+            // Defer the actual open so this frame paints the overlay first,
+            // then do the whole (slow, synchronous) open on the next tick.
+            let fs = fs.clone();
+            let ui_weak = ui_weak.clone();
+            let state = state.clone();
+            let name = name.clone();
+            Timer::single_shot(Duration::from_millis(0), move || {
+                let Some(ui) = ui_weak.upgrade() else { return };
+
+                let finish = |ui: &AppWindow, state: &Rc<RefCell<State>>| {
+                    state.borrow_mut().busy = false;
+                    ui.global::<Ui>().set_loading(false);
+                    log::info!("loading done");
+                };
+
+                let bytes = match read_bytes(&fs, &full, loc) {
+                    Ok(b) => b,
+                    Err(msg) => {
+                        show_error(&ui, msg);
+                        finish(&ui, &state);
                         return;
                     }
-                    // Drop the parsed document; `show_page` reparses. Holding
-                    // it here would keep every page we then render.
-                    drop(pdf);
-                    {
-                        let mut s = state.borrow_mut();
-                        s.data = Some(data);
-                        s.page_count = page_count;
-                        s.page_idx = 0;
-                        s.doc_name = name.to_string();
+                };
+                let data = Arc::new(bytes);
+                match Pdf::new(data.clone()) {
+                    Ok(pdf) => {
+                        let page_count = pdf.pages().len();
+                        if page_count == 0 {
+                            show_error(&ui, "This PDF has no pages".to_string());
+                            finish(&ui, &state);
+                            return;
+                        }
+                        // Drop the parsed document; `show_page` reparses. Holding
+                        // it here would keep every page we then render.
+                        drop(pdf);
+                        {
+                            let mut s = state.borrow_mut();
+                            s.data = Some(data);
+                            s.page_count = page_count;
+                            s.page_idx = 0;
+                            s.doc_name = name.to_string();
+                        }
+                        let rendered = show_page(&ui, &state.borrow());
+                        let refused_page = !ui.global::<Viewer>().get_page_message().is_empty();
+                        if rendered || refused_page {
+                            // A refused FIRST page is not a refused document.
+                            show_info(&ui, "");
+                            ui.global::<Ui>().set_viewing(true);
+                        } else {
+                            state.borrow_mut().data = None;
+                            show_error(&ui, RENDER_REFUSED.with(|m| m.borrow().clone()));
+                        }
                     }
-                    let rendered = show_page(&ui, &state.borrow());
-                    let refused_page = !ui.global::<Viewer>().get_page_message().is_empty();
-                    if rendered || refused_page {
-                        // A refused FIRST page is not a refused document.
-                        show_info(&ui, "");
-                        ui.global::<Ui>().set_viewing(true);
-                    } else {
-                        state.borrow_mut().data = None;
-                        show_error(&ui, RENDER_REFUSED.with(|m| m.borrow().clone()));
+                    Err(e) => {
+                        log::warn!("open-pdf failed: {e:?}");
+                        show_error(
+                            &ui,
+                            "Couldn't open this file. It may not be a PDF, or it may be encrypted."
+                                .to_string(),
+                        );
                     }
                 }
-                Err(e) => {
-                    log::warn!("open-pdf failed: {e:?}");
-                    show_error(
-                        &ui,
-                        "Couldn't open this file. It may not be a PDF, or it may be encrypted."
-                            .to_string(),
-                    );
-                }
-            }
+                finish(&ui, &state);
+            });
         });
     }
 
@@ -224,6 +259,9 @@ fn app_main(cx: AppContext, ui: AppWindow) {
         let state = state.clone();
         let refresh = refresh.clone();
         callbacks.on_go_back(move || {
+            if state.borrow().busy {
+                return;
+            }
             {
                 let mut s = state.borrow_mut();
                 s.path = parent_path(&s.path);
@@ -237,6 +275,9 @@ fn app_main(cx: AppContext, ui: AppWindow) {
         let state = state.clone();
         let ui_weak = ui_weak.clone();
         callbacks.on_close_viewer(move || {
+            if state.borrow().busy {
+                return;
+            }
             log::info!("cb: close-viewer");
             let mut s = state.borrow_mut();
             s.data = None;
@@ -255,11 +296,35 @@ fn app_main(cx: AppContext, ui: AppWindow) {
         callbacks.on_prev_page(move || {
             log::info!("cb: prev-page");
             let Some(ui) = ui_weak.upgrade() else { return };
-            let mut s = state.borrow_mut();
-            if s.data.is_some() && s.page_idx > 0 {
-                s.page_idx -= 1;
-                show_page(&ui, &s); // false here just means "refused"; stay open
+            if state.borrow().busy {
+                return;
             }
+            let (can_go, target_num) = {
+                let s = state.borrow();
+                (s.data.is_some() && s.page_idx > 0, s.page_idx)
+            };
+            if !can_go {
+                return;
+            }
+            state.borrow_mut().busy = true;
+            let u = ui.global::<Ui>();
+            u.set_loading(true);
+            u.set_loading_text(format!("Page {target_num}…").into());
+            log::info!("loading: page {target_num}");
+
+            let ui_weak = ui_weak.clone();
+            let state = state.clone();
+            Timer::single_shot(Duration::from_millis(0), move || {
+                let Some(ui) = ui_weak.upgrade() else { return };
+                {
+                    let mut s = state.borrow_mut();
+                    s.page_idx -= 1;
+                }
+                show_page(&ui, &state.borrow()); // false here just means "refused"; stay open
+                state.borrow_mut().busy = false;
+                ui.global::<Ui>().set_loading(false);
+                log::info!("loading done");
+            });
         });
     }
     {
@@ -268,12 +333,35 @@ fn app_main(cx: AppContext, ui: AppWindow) {
         callbacks.on_next_page(move || {
             log::info!("cb: next-page");
             let Some(ui) = ui_weak.upgrade() else { return };
-            let mut s = state.borrow_mut();
-            let count = s.page_count;
-            if s.page_idx + 1 < count {
-                s.page_idx += 1;
-                show_page(&ui, &s); // false here just means "refused"; stay open
+            if state.borrow().busy {
+                return;
             }
+            let (can_go, target_num) = {
+                let s = state.borrow();
+                (s.page_idx + 1 < s.page_count, s.page_idx + 2)
+            };
+            if !can_go {
+                return;
+            }
+            state.borrow_mut().busy = true;
+            let u = ui.global::<Ui>();
+            u.set_loading(true);
+            u.set_loading_text(format!("Page {target_num}…").into());
+            log::info!("loading: page {target_num}");
+
+            let ui_weak = ui_weak.clone();
+            let state = state.clone();
+            Timer::single_shot(Duration::from_millis(0), move || {
+                let Some(ui) = ui_weak.upgrade() else { return };
+                {
+                    let mut s = state.borrow_mut();
+                    s.page_idx += 1;
+                }
+                show_page(&ui, &state.borrow()); // false here just means "refused"; stay open
+                state.borrow_mut().busy = false;
+                ui.global::<Ui>().set_loading(false);
+                log::info!("loading done");
+            });
         });
     }
 

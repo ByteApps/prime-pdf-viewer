@@ -247,6 +247,40 @@ component ViewerView inherits Rectangle {
     }
 }
 
+// Full-screen loading overlay: a scrim over everything plus a centered card
+// showing what's happening. The TouchArea fills the overlay so taps during a
+// deferred open/page-turn are swallowed instead of queuing up and replaying
+// once the heavy work finishes.
+component LoadingOverlay inherits Rectangle {
+    background: Theme.palette-foreground.with-alpha(0.5);
+
+    TouchArea {
+        width: parent.width;
+        height: parent.height;
+    }
+
+    Rectangle {
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        width: card-text.preferred-width + 48px;
+        height: 72px;
+        border-radius: 12px;
+        background: Theme.palette-card;
+        border-width: 1px;
+        border-color: Theme.palette-border;
+
+        card-text := Text {
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            text: Ui.loading-text;
+            color: Theme.palette-foreground;
+            font-family: "Montserrat";
+            font-size: 14px;
+            horizontal-alignment: center;
+        }
+    }
+}
+
 export component AppWindow inherits Window {
     title: "PDF Viewer";
     preferred-width: 480px;
@@ -266,6 +300,11 @@ export component AppWindow inherits Window {
 
             if !Ui.viewing: BrowserView {}
             if Ui.viewing: ViewerView {}
+        }
+
+        if Ui.loading: LoadingOverlay {
+            width: parent.width;
+            height: parent.height;
         }
     }
 }

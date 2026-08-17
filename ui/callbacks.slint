@@ -33,6 +33,10 @@ export global Ui {
     in-out property <bool> viewing: false;   // false = browser, true = page viewer
     in property <string> message: "";        // transient info/error banner
     in property <bool> message-error: false; // true = error (red), false = info
+    // Full-screen loading overlay, shown while a heavy op (open / page turn)
+    // runs on a deferred timer so the loading frame paints before it starts.
+    in property <bool> loading: false;
+    in property <string> loading-text: "";
 }
 
 // Callbacks bridged to Rust in main.rs.
