@@ -1,5 +1,5 @@
 {
   "id": "app_theme",
   "name": "prime-pdf-viewer Theme",
-  "parent": "default_theme"
+  "parent": "base_theme"
 }

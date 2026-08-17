@@ -6,13 +6,13 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use hayro::{render, InterpreterSettings, Pdf, RenderSettings};
-use slint_keyos_platform::app_ui;
+use slint_keyos_platform::app_ui2;
 use slint_keyos_platform::fs::{self, Location, OpenFlags};
 use slint_keyos_platform::slint::{
     ComponentHandle, Image, ModelRc, Rgba8Pixel, SharedPixelBuffer, VecModel,
 };
 
-app_ui!("prime-pdf-viewer");
+app_ui2!("PDF Viewer");
 
 /// Width the page is rasterized to: the window (480) minus the 20px content
 /// padding on each side, so a page always fits the screen edge to edge.

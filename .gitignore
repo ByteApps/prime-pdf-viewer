@@ -2,9 +2,14 @@ target/
 ui/ui
 resources/*
 !resources/icon.svg
+!resources/icon-dark.svg
+!resources/theme.json
 manifest.toml
 
 # Internal docs kept in the private workspace companion (prime/private/prime-pdf-viewer)
 CLAUDE.md
 DEVELOPMENT.md
 NOTES.md
+
+# Local SDK symlink created by the foundation CLI (machine-specific path)
+.foundation-sdk/
