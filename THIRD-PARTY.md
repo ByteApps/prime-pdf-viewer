@@ -8,6 +8,13 @@ Direct dependencies of this app. The complete transitive list (with exact versio
 |---|---|---|---|
 | [hayro](https://github.com/LaurenzV/hayro) | 0.4.0 (pinned) | Apache-2.0 | Pure-Rust PDF parsing and rasterization (embedded standard-14 fonts and CMaps included) |
 | [log](https://crates.io/crates/log) | 0.4 | MIT OR Apache-2.0 | Logging facade |
+| [jpeg-decoder](https://github.com/image-rs/jpeg-decoder) | 0.3 (`platform_independent`, no `rayon`) | MIT OR Apache-2.0 | Pulled in by the vendored `hayro-syntax` patch below; its IDCT downscaling decodes large embedded JPEGs at reduced resolution instead of full size |
+
+## Vendored code
+
+| Component | Version | License | Why vendored |
+|---|---|---|---|
+| [hayro-syntax](https://github.com/LaurenzV/hayro) | 0.7.2 | Apache-2.0 OR MIT | `vendor/hayro-syntax`, pulled in via `[patch.crates-io]`. Patches the `DCTDecode` filter (`src/filter/dct.rs`) to honor the renderer's `ImageDecodeParams::target_dimension` hint with a scaled `jpeg-decoder` decode, so a large embedded JPEG that will only ever be drawn small doesn't pay full-resolution decode time/memory. Falls through to the original zune-jpeg path on any error or unmet precondition. Not yet upstreamed. |
 
 ## Foundation SDK / KeyOS platform
 

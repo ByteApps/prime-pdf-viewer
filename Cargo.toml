@@ -20,3 +20,14 @@ foundation-themes = { path = "../keyos-sdk/lib/keyos/sdk/crates/foundation-theme
 [build-dependencies]
 foundation-themes = { path = "../keyos-sdk/lib/keyos/sdk/crates/foundation-themes" }
 slint-keyos-platform-build = { path = "../keyos-sdk/lib/keyos/slint-keyos-platform/build" }
+
+[dev-dependencies]
+# Only for encoding synthetic test JPEGs in tests/dct_downsample.rs; not part
+# of the shipped app's dependency graph.
+image = { version = "0.25", default-features = false, features = ["jpeg"] }
+
+# Vendored to patch DCTDecode with target_dimension-aware scaled decoding
+# (see vendor/hayro-syntax/src/filter/dct.rs). Version must stay 0.7.2 to
+# match the semver range hayro 0.7 depends on.
+[patch.crates-io]
+hayro-syntax = { path = "vendor/hayro-syntax" }

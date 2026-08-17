@@ -2000,13 +2000,12 @@ checksum = "885c5ef0654933139a9b9546fc2c69e18d37f38aa2520f079092b1be18f1fcaa"
 [[package]]
 name = "hayro-syntax"
 version = "0.7.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0edeafd70aa2db743de8ede8637d07ec87db05efe69cde371d03f1b185fcef27"
 dependencies = [
  "flate2",
  "hayro-ccitt",
  "hayro-jbig2",
  "hayro-jpeg2000",
+ "jpeg-decoder",
  "memchr",
  "rustc-hash 2.1.1",
  "smallvec",
@@ -3197,6 +3196,12 @@ dependencies = [
  "getrandom 0.3.4",
  "libc",
 ]
+
+[[package]]
+name = "jpeg-decoder"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "00810f1d8b74be64b13dbf3db89ac67740615d6c891f0e7b6179326533011a07"
 
 [[package]]
 name = "js-sys"
@@ -4598,6 +4603,7 @@ version = "0.1.0"
 dependencies = [
  "foundation-themes",
  "hayro",
+ "image",
  "log",
  "server",
  "slint-keyos-platform",
