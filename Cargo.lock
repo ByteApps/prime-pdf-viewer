@@ -1956,8 +1956,6 @@ dependencies = [
 [[package]]
 name = "hayro-interpret"
 version = "0.7.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f2613d0406898995042d0794c4245b2f2fba1246490c8ac593769bba6551129d"
 dependencies = [
  "bitflags 2.11.0",
  "hayro-cmap",
@@ -4601,9 +4599,11 @@ dependencies = [
 name = "prime-pdf-viewer"
 version = "0.1.0"
 dependencies = [
+ "flate2",
  "foundation-themes",
  "hayro",
  "image",
+ "kurbo 0.13.1",
  "log",
  "server",
  "slint-keyos-platform",

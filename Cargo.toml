@@ -25,9 +25,24 @@ slint-keyos-platform-build = { path = "../keyos-sdk/lib/keyos/slint-keyos-platfo
 # Only for encoding synthetic test JPEGs in tests/dct_downsample.rs; not part
 # of the shipped app's dependency graph.
 image = { version = "0.25", default-features = false, features = ["jpeg"] }
+# Only for encoding synthetic FlateDecode (zlib) image streams in
+# tests/interpret_downsample.rs; not part of the shipped app's dependency graph.
+flate2 = "1"
+# Only for implementing a minimal hayro_interpret::Device in
+# tests/interpret_downsample.rs (its trait methods are typed in terms of
+# kurbo geometry); pinned to 0.13 to match hayro-interpret 0.7.0's own
+# dependency so the types are the same crate, not just semver-compatible.
+kurbo = "0.13"
 
 # Vendored to patch DCTDecode with target_dimension-aware scaled decoding
 # (see vendor/hayro-syntax/src/filter/dct.rs). Version must stay 0.7.2 to
 # match the semver range hayro 0.7 depends on.
+#
+# Vendored to downsample decoded raster images (all filters, not just DCT)
+# toward target_dimension before they're cached/composited (see
+# vendor/hayro-interpret/src/x_object.rs). Version must stay 0.7.0 to match
+# the semver range hayro 0.7 depends on; its own hayro-syntax dependency
+# resolves to the vendor/hayro-syntax patch above through this same table.
 [patch.crates-io]
 hayro-syntax = { path = "vendor/hayro-syntax" }
+hayro-interpret = { path = "vendor/hayro-interpret" }
