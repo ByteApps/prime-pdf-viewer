@@ -5,7 +5,11 @@ use std::io::Read;
 use std::rc::Rc;
 use std::sync::Arc;
 
-use hayro::{render, InterpreterSettings, Pdf, RenderSettings};
+use hayro::hayro_interpret::hayro_syntax::object::{Dict, Stream};
+use hayro::hayro_interpret::hayro_syntax::page::Page;
+use hayro::hayro_interpret::hayro_syntax::Pdf;
+use hayro::hayro_interpret::InterpreterSettings;
+use hayro::{render, RenderCache, RenderSettings};
 use slint_keyos_platform::app_ui2;
 use slint_keyos_platform::fs::{self, Location, OpenFlags};
 use slint_keyos_platform::slint::{
@@ -50,7 +54,16 @@ const MAX_PDF_BYTES: u64 = 6 * 1024 * 1024;
 struct State {
     location: Location,
     path: String,          // current directory, always starts with '/'
-    pdf: Option<Pdf>,      // the open document (owns its bytes)
+    /// The open document's BYTES, not a parsed `Pdf`.
+    ///
+    /// hayro caches decoded page content inside the `Pdf` and never evicts it:
+    /// measured with `examples/mem_probe`, each rendered page retains ~9 MB
+    /// that live RSS confirms is never returned (299 MB after 25 pages of an
+    /// 11 MB manual). Keeping one `Pdf` for the session therefore grows without
+    /// bound as the user pages. We reparse per render instead -- parsing is
+    /// ~6 MB and fast -- so a session's peak is one page's cost, not the sum.
+    data: Option<Arc<Vec<u8>>>,
+    page_count: usize,
     page_idx: usize,       // 0-based index of the page on screen
     doc_name: String,
 }
@@ -66,7 +79,8 @@ fn app_main(cx: AppContext, ui: AppWindow) {
     let state = Rc::new(RefCell::new(State {
         location: Location::User,
         path: "/".to_string(),
-        pdf: None,
+        data: None,
+        page_count: 0,
         page_idx: 0,
         doc_name: String::new(),
     }));
@@ -178,16 +192,21 @@ fn app_main(cx: AppContext, ui: AppWindow) {
                     return;
                 }
             };
-            match Pdf::new(Arc::new(bytes)) {
+            let data = Arc::new(bytes);
+            match Pdf::new(data.clone()) {
                 Ok(pdf) => {
                     let page_count = pdf.pages().len();
                     if page_count == 0 {
                         show_error(&ui, "This PDF has no pages".to_string());
                         return;
                     }
+                    // Drop the parsed document; `show_page` reparses. Holding
+                    // it here would keep every page we then render.
+                    drop(pdf);
                     {
                         let mut s = state.borrow_mut();
-                        s.pdf = Some(pdf);
+                        s.data = Some(data);
+                        s.page_count = page_count;
                         s.page_idx = 0;
                         s.doc_name = name.to_string();
                     }
@@ -195,8 +214,8 @@ fn app_main(cx: AppContext, ui: AppWindow) {
                         show_info(&ui, "");
                         ui.global::<Ui>().set_viewing(true);
                     } else {
-                        state.borrow_mut().pdf = None;
-                        show_error(&ui, "Couldn't render this PDF".to_string());
+                        state.borrow_mut().data = None;
+                        show_error(&ui, RENDER_REFUSED.with(|m| m.borrow().clone()));
                     }
                 }
                 Err(e) => {
@@ -231,7 +250,8 @@ fn app_main(cx: AppContext, ui: AppWindow) {
         callbacks.on_close_viewer(move || {
             log::info!("cb: close-viewer");
             let mut s = state.borrow_mut();
-            s.pdf = None;
+            s.data = None;
+            s.page_count = 0;
             s.page_idx = 0;
             if let Some(ui) = ui_weak.upgrade() {
                 ui.global::<Ui>().set_viewing(false);
@@ -247,7 +267,7 @@ fn app_main(cx: AppContext, ui: AppWindow) {
             log::info!("cb: prev-page");
             let Some(ui) = ui_weak.upgrade() else { return };
             let mut s = state.borrow_mut();
-            if s.pdf.is_some() && s.page_idx > 0 {
+            if s.data.is_some() && s.page_idx > 0 {
                 s.page_idx -= 1;
                 show_page(&ui, &s);
             }
@@ -260,7 +280,7 @@ fn app_main(cx: AppContext, ui: AppWindow) {
             log::info!("cb: next-page");
             let Some(ui) = ui_weak.upgrade() else { return };
             let mut s = state.borrow_mut();
-            let count = s.pdf.as_ref().map_or(0, |p| p.pages().len());
+            let count = s.page_count;
             if s.page_idx + 1 < count {
                 s.page_idx += 1;
                 show_page(&ui, &s);
@@ -271,13 +291,111 @@ fn app_main(cx: AppContext, ui: AppWindow) {
     ui.run().expect("UI running");
 }
 
+/// Largest total decoded-image budget for a single page.
+///
+/// `show_page` refuses a page whose images would exceed this. hayro decodes an
+/// image XObject at its NATIVE resolution before drawing it, so a 3000x2000
+/// photo costs 24 MB whether it is shown full-page or thumbnail-sized -- which
+/// is why this, not the file size, is the ceiling that matters. Measured on
+/// the manual that crashed the device: page 1 = ~54 MB (hayro 0.7).
+///
+/// 24 MB is a starting point pending device calibration: it admits a
+/// full-page 2400x2400 photo and refuses the multi-image pages that killed the
+/// app. TUNE WITH DEVICE EVIDENCE -- what it prevents is an abort with no
+/// error path.
+const MAX_PAGE_IMAGE_BYTES: u64 = 24 * 1024 * 1024;
+
+thread_local! {
+    /// Why the last render was refused. `show_page` returns a bare bool to its
+    /// callers (three call sites, one of which is inside a borrow), so the
+    /// explanation rides here rather than through every signature.
+    static RENDER_REFUSED: RefCell<String> = const { RefCell::new(String::new()) };
+}
+
+fn set_refusal(msg: &str) {
+    RENDER_REFUSED.with(|m| *m.borrow_mut() = msg.to_string());
+}
+
+/// Sum the decoded size of every image a page draws, following Form XObjects.
+///
+/// Deliberately an OVER-estimate of what hayro will hold: it counts every
+/// image the page references, at 4 bytes per pixel, without deduplicating
+/// repeats. Under-counting here would let through exactly the page that
+/// aborts the process, so the error direction is chosen on purpose.
+fn page_image_bytes(page: &Page<'_>) -> u64 {
+    fn walk(xobjects: &Dict<'_>, depth: u32, total: &mut u64) {
+        // Forms can nest; bound the recursion rather than trusting the file.
+        if depth > 4 {
+            return;
+        }
+        for key in xobjects.keys() {
+            let Some(stream) = xobjects.get::<Stream<'_>>(key.as_ref()) else { continue };
+            let dict = stream.dict();
+            let subtype: Option<Vec<u8>> =
+                dict.get::<hayro::hayro_interpret::hayro_syntax::object::Name<'_>>(b"Subtype")
+                    .map(|n| n.as_ref().to_vec());
+            match subtype.as_deref() {
+                Some(b"Image") => {
+                    let w = dict.get::<f32>(b"Width").unwrap_or(0.0).max(0.0) as u64;
+                    let h = dict.get::<f32>(b"Height").unwrap_or(0.0).max(0.0) as u64;
+                    // 4 bytes/px: hayro decodes to RGBA8 regardless of the
+                    // source colour space or bit depth.
+                    *total = total.saturating_add(w.saturating_mul(h).saturating_mul(4));
+                }
+                Some(b"Form") => {
+                    if let Some(res) = dict.get::<Dict<'_>>(b"Resources") {
+                        if let Some(inner) = res.get::<Dict<'_>>(b"XObject") {
+                            walk(&inner, depth + 1, total);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    let mut total = 0u64;
+    walk(&page.resources().x_objects, 0, &mut total);
+    total
+}
+
 /// Rasterize the current page fit-to-width and push it into the Viewer global.
 /// Returns false if rendering panicked (malformed content stream).
 fn show_page(ui: &AppWindow, st: &State) -> bool {
-    let Some(pdf) = st.pdf.as_ref() else { return false };
+    let Some(data) = st.data.as_ref() else { return false };
+    // Reparse per render so hayro's per-page cache dies with this `Pdf`
+    // (see `State::data`). Costs ~6 MB and a fraction of a second.
+    let Ok(pdf) = Pdf::new(data.clone()) else {
+        set_refusal("Couldn't read this PDF");
+        return false;
+    };
     let pages = pdf.pages();
     let count = pages.len();
+    if st.page_idx >= count {
+        return false;
+    }
     let page = &pages[st.page_idx];
+
+    // Pre-flight: refuse a page we cannot afford to draw, BEFORE hayro tries.
+    // A file-size cap cannot catch this -- an 11 MB manual needs ~54-87 MB for
+    // page 1 while a 13 MB image PDF needs ~50 MB -- because the cost is the
+    // page's images decoded at NATIVE resolution, which no render scale
+    // reduces (verified: 1/4 scale changed the peak by 4%).
+    let decoded = page_image_bytes(page);
+    if decoded > MAX_PAGE_IMAGE_BYTES {
+        log::warn!(
+            "page {} needs ~{} of image memory (limit {})",
+            st.page_idx + 1,
+            human_size(decoded),
+            human_size(MAX_PAGE_IMAGE_BYTES)
+        );
+        set_refusal(&format!(
+            "Page {} is too detailed to display (needs ~{}).",
+            st.page_idx + 1,
+            human_size(decoded)
+        ));
+        return false;
+    }
 
     let (pw, ph) = page.render_dimensions();
     let mut scale = if pw > 0.0 { PAGE_WIDTH / pw } else { 1.0 };
@@ -294,9 +412,13 @@ fn show_page(ui: &AppWindow, st: &State) -> bool {
 
     // hayro forbids unsafe and normally renders malformed content as blanks,
     // but a panic here would take the whole app down — contain it.
+    // hayro 0.7 takes the render cache explicitly. A fresh one per page keeps
+    // nothing between renders -- the whole point of reparsing above.
+    let cache = RenderCache::new();
     let rendered = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         render(
             page,
+            &cache,
             &InterpreterSettings::default(),
             &RenderSettings {
                 x_scale: scale,
@@ -309,6 +431,7 @@ fn show_page(ui: &AppWindow, st: &State) -> bool {
         Ok(p) => p,
         Err(_) => {
             log::warn!("render panicked on page {}", st.page_idx + 1);
+            set_refusal("Couldn't render this page");
             return false;
         }
     };

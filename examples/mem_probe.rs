@@ -17,7 +17,9 @@
 
 use std::sync::Arc;
 
-use hayro::{render, InterpreterSettings, Pdf, RenderSettings};
+use hayro::hayro_interpret::hayro_syntax::Pdf;
+use hayro::hayro_interpret::InterpreterSettings;
+use hayro::{render, RenderCache, RenderSettings};
 
 const PAGE_WIDTH: f32 = 440.0; // must match src/main.rs
 const MAX_PAGE_HEIGHT: f32 = 4096.0;
@@ -113,8 +115,10 @@ fn main() {
                 if ph * scale > MAX_PAGE_HEIGHT {
                     scale = MAX_PAGE_HEIGHT / ph;
                 }
+                let cache = RenderCache::new();
                 let pix = render(
                     page,
+                    &cache,
                     &InterpreterSettings::default(),
                     &RenderSettings { x_scale: scale, y_scale: scale, ..Default::default() },
                 );
@@ -147,8 +151,10 @@ fn main() {
         if ph * scale > MAX_PAGE_HEIGHT {
             scale = MAX_PAGE_HEIGHT / ph;
         }
+        let cache = RenderCache::new();
         let pix = render(
             page,
+            &cache,
             &InterpreterSettings::default(),
             &RenderSettings { x_scale: scale, y_scale: scale, ..Default::default() },
         );
