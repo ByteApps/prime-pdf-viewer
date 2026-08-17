@@ -20,6 +20,32 @@ const PAGE_WIDTH: f32 = 440.0;
 /// Cap on rendered pixmap height, to bound the allocation for absurd pages.
 const MAX_PAGE_HEIGHT: f32 = 4096.0;
 
+/// Largest PDF we will try to open.
+///
+/// Opening a PDF costs far more than the file: at peak the app holds the whole
+/// file, hayro's parsed objects and the decompressed images for the page,
+/// hayro's pixmap, AND our copy of that pixmap in a `SharedPixelBuffer`.
+/// Measured with `cargo run --release --example mem_probe` against hayro 0.4.0
+/// (one process per file, peak RSS):
+///
+/// | file    | peak RSS | over baseline |
+/// |---------|----------|---------------|
+/// | 0.4 MB  | 12.5 MB  |  2.5 MB       |
+/// | 2.1 MB  | 21.6 MB  | 11.6 MB       |
+/// | 5.7 MB  | 31.5 MB  | 21.5 MB       |
+/// | 13.4 MB | 49.6 MB  | 39.6 MB       |
+/// | 32.4 MB | 74.1 MB  | 64.1 MB       |
+///
+/// i.e. roughly `2.4 x file + 8 MB`, before the app's own UI and framebuffers.
+/// An ~11 MB PDF therefore wants ~35-40 MB of heap, which is what killed the
+/// app on device (reported 2026-08-17); KeyOS publishes no per-app heap budget
+/// for us to read, so this ceiling is empirical, not derived.
+///
+/// 6 MB predicts a ~22 MB peak — comfortably under the size that crashed, and
+/// still covering ordinary documents. RAISE IT ONLY WITH DEVICE EVIDENCE: the
+/// failure it prevents is an abort with no error path, not a caught error.
+const MAX_PDF_BYTES: u64 = 6 * 1024 * 1024;
+
 /// Mutable app state shared across the UI callbacks.
 struct State {
     location: Location,
@@ -259,6 +285,13 @@ fn show_page(ui: &AppWindow, st: &State) -> bool {
         scale = MAX_PAGE_HEIGHT / ph;
     }
 
+    // Drop the page currently on screen BEFORE rasterizing the next one.
+    // Otherwise peak memory holds three full-page buffers at once: the old
+    // page's `Image`, hayro's new pixmap, and our copy of it. At
+    // MAX_PAGE_HEIGHT that is ~7 MB each, and the app is already tight enough
+    // on heap that an 11 MB document crashed it.
+    ui.global::<Viewer>().set_page_img(Image::default());
+
     // hayro forbids unsafe and normally renders malformed content as blanks,
     // but a panic here would take the whole app down — contain it.
     let rendered = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -295,6 +328,13 @@ fn show_page(ui: &AppWindow, st: &State) -> bool {
 }
 
 /// Read a whole file; returns a user-facing message on failure.
+///
+/// Refuses anything over `MAX_PDF_BYTES` before allocating, and reserves the
+/// buffer fallibly: a plain `read_to_end` grows by doubling and ABORTS the
+/// process if an allocation fails, which is a crash with no error path and no
+/// log line. `try_reserve_exact` turns that into a message instead, and asking
+/// for the exact size also avoids the doubling overshoot (a 6 MB file can
+/// otherwise transiently hold an 8 MB buffer).
 fn read_bytes(
     fs: &fs::FileSystem<fs_permissions::FileSystemPermissions>,
     path: &str,
@@ -303,7 +343,17 @@ fn read_bytes(
     let mut file = fs
         .open_file(path, loc, OpenFlags::READ_ONLY)
         .map_err(|e| err_msg(&e))?;
+    let len = file.metadata().map(|m| m.size).unwrap_or(0);
+    if len > MAX_PDF_BYTES {
+        return Err(format!(
+            "This PDF is {} — too large to open (limit {}).",
+            human_size(len),
+            human_size(MAX_PDF_BYTES)
+        ));
+    }
     let mut buf = Vec::new();
+    buf.try_reserve_exact(len as usize)
+        .map_err(|_| "Not enough memory to open this PDF".to_string())?;
     file.read_to_end(&mut buf)
         .map_err(|_| "Read failed".to_string())?;
     Ok(buf)
