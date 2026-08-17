@@ -213,6 +213,21 @@ component ViewerView inherits Rectangle {
         }
     }
 
+    // A page the app refuses to render (too much memory) still leaves the
+    // document open, so the reader can page past it -- hence a message line
+    // inside the viewer, not just on the browser screen.
+    if Viewer.page-message != "": Text {
+        x: 0;
+        y: 76px;
+        width: parent.width;
+        text: Viewer.page-message;
+        color: Theme.palette-danger;
+        font-family: "Montserrat";
+        font-size: 14px;
+        wrap: word-wrap;
+        horizontal-alignment: center;
+    }
+
     Flickable {
         x: 0;
         y: 68px;

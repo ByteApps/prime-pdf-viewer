@@ -62,6 +62,39 @@ fn current_rss() -> u64 {
         .unwrap_or(0)
 }
 
+/// Mirror of `page_image_bytes` in src/main.rs -- keep them in step.
+fn page_image_bytes(page: &hayro::hayro_interpret::hayro_syntax::page::Page<'_>) -> u64 {
+    use hayro::hayro_interpret::hayro_syntax::object::{Dict, Name, Stream};
+    fn walk(xobjects: &Dict<'_>, depth: u32, total: &mut u64) {
+        if depth > 4 {
+            return;
+        }
+        for key in xobjects.keys() {
+            let Some(stream) = xobjects.get::<Stream<'_>>(key.as_ref()) else { continue };
+            let dict = stream.dict();
+            let subtype: Option<Vec<u8>> = dict.get::<Name<'_>>(b"Subtype").map(|n| n.as_ref().to_vec());
+            match subtype.as_deref() {
+                Some(b"Image") => {
+                    let w = dict.get::<f32>(b"Width").unwrap_or(0.0).max(0.0) as u64;
+                    let h = dict.get::<f32>(b"Height").unwrap_or(0.0).max(0.0) as u64;
+                    *total = total.saturating_add(w.saturating_mul(h).saturating_mul(4));
+                }
+                Some(b"Form") => {
+                    if let Some(res) = dict.get::<Dict<'_>>(b"Resources") {
+                        if let Some(inner) = res.get::<Dict<'_>>(b"XObject") {
+                            walk(&inner, depth + 1, total);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    let mut total = 0u64;
+    walk(&page.resources().x_objects, 0, &mut total);
+    total
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.is_empty() {
@@ -102,6 +135,30 @@ fn main() {
         }
         let after_parse = peak_rss();
 
+        // What the app's pre-flight would compute for every page: the sum of
+        // image XObjects at w*h*4. Cheap (no rendering), so it answers "which
+        // pages would this build actually show?" directly.
+        if std::env::var("PROBE_PAGE_BUDGET").is_ok() {
+            let mut over = 0usize;
+            let mut worst = 0u64;
+            let limit: u64 = std::env::var("PROBE_LIMIT_MB").ok()
+                .and_then(|v| v.parse::<u64>().ok()).unwrap_or(24) * 1024 * 1024;
+            for (i, page) in pages.iter().enumerate() {
+                let bytes = page_image_bytes(page);
+                worst = worst.max(bytes);
+                if bytes > limit {
+                    over += 1;
+                    if over <= 6 {
+                        println!("    page {:>3}: {:>7.1} MB of images — REFUSED", i + 1, mb(bytes));
+                    }
+                }
+            }
+            println!(
+                "    pages over {} MB: {} of {} (worst page {:.1} MB)",
+                limit / 1024 / 1024, over, pages.len(), mb(worst)
+            );
+        }
+
         // Per-page sweep: rendering cost is a property of page CONTENT (a
         // full-resolution embedded photo decodes to RGBA regardless of the
         // scale we draw it at), so the worst page is what has to fit, not the
@@ -124,17 +181,19 @@ fn main() {
                 );
                 let now = peak_rss();
                 let delta = now.saturating_sub(prev);
+                let imgs = page_image_bytes(page);
                 if delta > worst.1 {
                     worst = (i + 1, delta);
                 }
                 let px_bytes = pix.width() as u64 * pix.height() as u64 * 4;
                 drop(pix);
-                if delta > 4 * 1024 * 1024 || i < 3 {
+                if delta > 4 * 1024 * 1024 || i < 6 {
                     println!(
-                        "    page {:>3}: +{:>6.1} MB  peak {:>6.1}  live-after-drop {:>6.1}  (pixmap {:.1} MB)",
-                        i + 1, mb(delta), mb(now), mb(current_rss()), mb(px_bytes)
+                        "    page {:>3}: images {:>6.1} MB -> render +{:>6.1} MB  (x{:.1})  peak {:>6.1}",
+                        i + 1, mb(imgs), mb(delta), mb(delta) / mb(imgs).max(0.1), mb(now)
                     );
                 }
+                let _ = px_bytes;
                 prev = now;
             }
             println!(

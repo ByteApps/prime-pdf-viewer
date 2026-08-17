@@ -26,29 +26,14 @@ const MAX_PAGE_HEIGHT: f32 = 4096.0;
 
 /// Largest PDF we will try to open.
 ///
-/// Opening a PDF costs far more than the file: at peak the app holds the whole
-/// file, hayro's parsed objects and the decompressed images for the page,
-/// hayro's pixmap, AND our copy of that pixmap in a `SharedPixelBuffer`.
-/// Measured with `cargo run --release --example mem_probe` against hayro 0.4.0
-/// (one process per file, peak RSS):
-///
-/// | file    | peak RSS | over baseline |
-/// |---------|----------|---------------|
-/// | 0.4 MB  | 12.5 MB  |  2.5 MB       |
-/// | 2.1 MB  | 21.6 MB  | 11.6 MB       |
-/// | 5.7 MB  | 31.5 MB  | 21.5 MB       |
-/// | 13.4 MB | 49.6 MB  | 39.6 MB       |
-/// | 32.4 MB | 74.1 MB  | 64.1 MB       |
-///
-/// i.e. roughly `2.4 x file + 8 MB`, before the app's own UI and framebuffers.
-/// An ~11 MB PDF therefore wants ~35-40 MB of heap, which is what killed the
-/// app on device (reported 2026-08-17); KeyOS publishes no per-app heap budget
-/// for us to read, so this ceiling is empirical, not derived.
-///
-/// 6 MB predicts a ~22 MB peak — comfortably under the size that crashed, and
-/// still covering ordinary documents. RAISE IT ONLY WITH DEVICE EVIDENCE: the
-/// failure it prevents is an abort with no error path, not a caught error.
-const MAX_PDF_BYTES: u64 = 6 * 1024 * 1024;
+/// The FILE is the cheap part: holding the bytes plus hayro's parsed objects
+/// costs about 1.6x the file size (an 11 MB manual reaches ~19 MB after
+/// parsing). What actually blows the heap is rendering a page, which
+/// `estimated_page_bytes` gates separately -- so this cap only has to keep the
+/// file itself affordable, and should NOT be tightened to compensate for
+/// expensive pages. Doing that refuses whole documents whose pages are almost
+/// all cheap: 290 of that manual's 291 pages need ~8 MB.
+const MAX_PDF_BYTES: u64 = 16 * 1024 * 1024;
 
 /// Mutable app state shared across the UI callbacks.
 struct State {
@@ -210,7 +195,10 @@ fn app_main(cx: AppContext, ui: AppWindow) {
                         s.page_idx = 0;
                         s.doc_name = name.to_string();
                     }
-                    if show_page(&ui, &state.borrow()) {
+                    let rendered = show_page(&ui, &state.borrow());
+                    let refused_page = !ui.global::<Viewer>().get_page_message().is_empty();
+                    if rendered || refused_page {
+                        // A refused FIRST page is not a refused document.
                         show_info(&ui, "");
                         ui.global::<Ui>().set_viewing(true);
                     } else {
@@ -269,7 +257,7 @@ fn app_main(cx: AppContext, ui: AppWindow) {
             let mut s = state.borrow_mut();
             if s.data.is_some() && s.page_idx > 0 {
                 s.page_idx -= 1;
-                show_page(&ui, &s);
+                show_page(&ui, &s); // false here just means "refused"; stay open
             }
         });
     }
@@ -283,7 +271,7 @@ fn app_main(cx: AppContext, ui: AppWindow) {
             let count = s.page_count;
             if s.page_idx + 1 < count {
                 s.page_idx += 1;
-                show_page(&ui, &s);
+                show_page(&ui, &s); // false here just means "refused"; stay open
             }
         });
     }
@@ -291,19 +279,34 @@ fn app_main(cx: AppContext, ui: AppWindow) {
     ui.run().expect("UI running");
 }
 
-/// Largest total decoded-image budget for a single page.
+/// Budget for rendering ONE page, and the model used to predict it.
 ///
-/// `show_page` refuses a page whose images would exceed this. hayro decodes an
-/// image XObject at its NATIVE resolution before drawing it, so a 3000x2000
-/// photo costs 24 MB whether it is shown full-page or thumbnail-sized -- which
-/// is why this, not the file size, is the ceiling that matters. Measured on
-/// the manual that crashed the device: page 1 = ~54 MB (hayro 0.7).
+/// Measured per page with `examples/mem_probe` (`PROBE_ALL_PAGES=1`) against
+/// the 11 MB owner's manual that crashed the device:
 ///
-/// 24 MB is a starting point pending device calibration: it admits a
-/// full-page 2400x2400 photo and refuses the multi-image pages that killed the
-/// app. TUNE WITH DEVICE EVIDENCE -- what it prevents is an abort with no
-/// error path.
-const MAX_PAGE_IMAGE_BYTES: u64 = 24 * 1024 * 1024;
+/// | page | images   | render cost |
+/// |------|----------|-------------|
+/// | 1    | 18.2 MB  | +53.4 MB    |
+/// | 3, 4 |  0.0 MB  | + 8.2 MB    |
+/// | 5-9  |  1.5 MB  | + 8.1 MB    |
+///
+/// Two components: a FIXED ~8 MB per page (fonts, content streams, hayro's
+/// per-page state) that appears even on pages with no images at all, plus
+/// roughly 3x the decoded image bytes. Summing image bytes alone was not
+/// enough -- it predicted 18 MB for a page that cost 53 MB, and would have
+/// waved this document through.
+const PAGE_RENDER_FIXED_BYTES: u64 = 8 * 1024 * 1024;
+/// Multiplier on decoded image bytes. hayro holds more than one representation
+/// while drawing (decode, colour conversion, scaling), so 4 bytes/pixel of
+/// source image costs ~3x that at peak.
+const PAGE_IMAGE_FACTOR: u64 = 3;
+/// Refuse a page whose predicted cost exceeds this.
+///
+/// EMPIRICAL, pending device calibration (`pdf-calibration/` on the USB
+/// stick): KeyOS exposes no per-app heap budget to read. 32 MB admits every
+/// ordinary page -- including 290 of the manual's 291 -- and refuses its
+/// image-heavy cover, which is the page that actually crashed the app.
+const MAX_PAGE_RENDER_BYTES: u64 = 32 * 1024 * 1024;
 
 thread_local! {
     /// Why the last render was refused. `show_page` returns a bare bool to its
@@ -314,6 +317,14 @@ thread_local! {
 
 fn set_refusal(msg: &str) {
     RENDER_REFUSED.with(|m| *m.borrow_mut() = msg.to_string());
+}
+
+/// Predict what rendering this page will cost: the fixed per-page overhead
+/// plus a multiple of its decoded image bytes. See the constants above for the
+/// measurements behind both terms.
+fn estimated_page_bytes(page: &Page<'_>) -> u64 {
+    PAGE_RENDER_FIXED_BYTES
+        .saturating_add(page_image_bytes(page).saturating_mul(PAGE_IMAGE_FACTOR))
 }
 
 /// Sum the decoded size of every image a page draws, following Form XObjects.
@@ -381,19 +392,30 @@ fn show_page(ui: &AppWindow, st: &State) -> bool {
     // page 1 while a 13 MB image PDF needs ~50 MB -- because the cost is the
     // page's images decoded at NATIVE resolution, which no render scale
     // reduces (verified: 1/4 scale changed the peak by 4%).
-    let decoded = page_image_bytes(page);
-    if decoded > MAX_PAGE_IMAGE_BYTES {
+    let predicted = estimated_page_bytes(page);
+    if predicted > MAX_PAGE_RENDER_BYTES {
         log::warn!(
-            "page {} needs ~{} of image memory (limit {})",
+            "page {} needs ~{} to render (limit {})",
             st.page_idx + 1,
-            human_size(decoded),
-            human_size(MAX_PAGE_IMAGE_BYTES)
+            human_size(predicted),
+            human_size(MAX_PAGE_RENDER_BYTES)
         );
-        set_refusal(&format!(
+        let msg = format!(
             "Page {} is too detailed to display (needs ~{}).",
             st.page_idx + 1,
-            human_size(decoded)
-        ));
+            human_size(predicted)
+        );
+        set_refusal(&msg);
+        // Keep the document open on a refused page: the rest of it is usually
+        // fine (290 of the crashing manual's 291 pages cost ~8 MB), so the
+        // reader can page past this one instead of being thrown out.
+        let viewer = ui.global::<Viewer>();
+        viewer.set_page_img(Image::default());
+        viewer.set_page_h(0.0);
+        viewer.set_page_message(msg.into());
+        viewer.set_page_num(st.page_idx as i32 + 1);
+        viewer.set_page_count(count as i32);
+        viewer.set_doc_name(st.doc_name.clone().into());
         return false;
     }
 
@@ -441,6 +463,7 @@ fn show_page(ui: &AppWindow, st: &State) -> bool {
     buf.make_mut_bytes().copy_from_slice(pix.data_as_u8_slice());
 
     let viewer = ui.global::<Viewer>();
+    viewer.set_page_message("".into());
     viewer.set_page_img(Image::from_rgba8_premultiplied(buf));
     viewer.set_page_h(h as f32);
     viewer.set_page_num(st.page_idx as i32 + 1);

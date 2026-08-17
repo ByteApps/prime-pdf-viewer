@@ -18,6 +18,9 @@ export global Browser {
 
 // State of the page-viewer screen, driven from Rust.
 export global Viewer {
+    // Non-empty when the current page could not be rendered (e.g. it needs
+    // more memory than the app can spend). The document stays open.
+    in property <string> page-message: "";
     in property <image> page-img;
     in property <int> page-num: 0;       // 1-based
     in property <int> page-count: 0;
