@@ -24,6 +24,11 @@ use hayro::{render, RenderCache, RenderSettings};
 const PAGE_WIDTH: f32 = 440.0; // must match src/main.rs
 const MAX_PAGE_HEIGHT: f32 = 4096.0;
 
+// Mirror of the cost-model constants in src/main.rs -- keep them in step.
+const PAGE_RENDER_FIXED_BYTES: u64 = 8 * 1024 * 1024;
+const PAGE_IMAGE_FACTOR: u64 = 2;
+const MAX_PAGE_RENDER_BYTES: u64 = 32 * 1024 * 1024;
+
 /// Peak resident set size in bytes, as the kernel measured it for this process.
 /// `ru_maxrss` is a high-water mark, so it never under-reports a transient
 /// spike the way sampling would.
@@ -62,10 +67,21 @@ fn current_rss() -> u64 {
         .unwrap_or(0)
 }
 
-/// Mirror of `page_image_bytes` in src/main.rs -- keep them in step.
-fn page_image_bytes(page: &hayro::hayro_interpret::hayro_syntax::page::Page<'_>) -> u64 {
+/// Mirror of `image_cost_bytes` in src/main.rs -- keep them in step.
+fn image_cost_bytes(native_w: u64, native_h: u64, bound_w: u64, bound_h: u64) -> u64 {
+    let native_area = native_w.saturating_mul(native_h);
+    let bound_area = bound_w.saturating_mul(bound_h);
+    4u64.saturating_mul(native_area.min(bound_area))
+}
+
+/// Mirror of `page_image_bytes` in src/main.rs -- keep them in step. Scale-
+/// aware since the vendored downsample patches make render scale a real
+/// lever on decode cost: an image can't cost more than ~2x its drawn size,
+/// bounded here by the whole page's pixmap at `scale` (see src/main.rs's
+/// doc comment for why the bound is page-shaped, not per-image).
+fn page_image_bytes(page: &hayro::hayro_interpret::hayro_syntax::page::Page<'_>, scale: f32) -> u64 {
     use hayro::hayro_interpret::hayro_syntax::object::{Dict, Name, Stream};
-    fn walk(xobjects: &Dict<'_>, depth: u32, total: &mut u64) {
+    fn walk(xobjects: &Dict<'_>, depth: u32, bound_w: u64, bound_h: u64, total: &mut u64) {
         if depth > 4 {
             return;
         }
@@ -77,12 +93,12 @@ fn page_image_bytes(page: &hayro::hayro_interpret::hayro_syntax::page::Page<'_>)
                 Some(b"Image") => {
                     let w = dict.get::<f32>(b"Width").unwrap_or(0.0).max(0.0) as u64;
                     let h = dict.get::<f32>(b"Height").unwrap_or(0.0).max(0.0) as u64;
-                    *total = total.saturating_add(w.saturating_mul(h).saturating_mul(4));
+                    *total = total.saturating_add(image_cost_bytes(w, h, bound_w, bound_h));
                 }
                 Some(b"Form") => {
                     if let Some(res) = dict.get::<Dict<'_>>(b"Resources") {
                         if let Some(inner) = res.get::<Dict<'_>>(b"XObject") {
-                            walk(&inner, depth + 1, total);
+                            walk(&inner, depth + 1, bound_w, bound_h, total);
                         }
                     }
                 }
@@ -90,9 +106,31 @@ fn page_image_bytes(page: &hayro::hayro_interpret::hayro_syntax::page::Page<'_>)
             }
         }
     }
+    let (pw, ph) = page.render_dimensions();
+    let bound_w = (2.0 * scale * pw).ceil().max(0.0) as u64;
+    let bound_h = (2.0 * scale * ph).ceil().max(0.0) as u64;
     let mut total = 0u64;
-    walk(&page.resources().x_objects, 0, &mut total);
+    walk(&page.resources().x_objects, 0, bound_w, bound_h, &mut total);
     total
+}
+
+/// Mirror of `estimated_page_bytes` in src/main.rs -- keep them in step.
+fn estimated_page_bytes(page: &hayro::hayro_interpret::hayro_syntax::page::Page<'_>, scale: f32) -> u64 {
+    PAGE_RENDER_FIXED_BYTES.saturating_add(page_image_bytes(page, scale).saturating_mul(PAGE_IMAGE_FACTOR))
+}
+
+/// Mirror of `pick_render_scale` in src/main.rs -- keep them in step.
+fn pick_render_scale(fit_scale: f32, mut estimate_fn: impl FnMut(f32) -> u64) -> Option<f32> {
+    let mut scale = fit_scale;
+    loop {
+        if estimate_fn(scale) <= MAX_PAGE_RENDER_BYTES {
+            return Some(scale);
+        }
+        if scale <= fit_scale / 4.0 {
+            return None;
+        }
+        scale /= 2.0;
+    }
 }
 
 fn main() {
@@ -135,34 +173,71 @@ fn main() {
         }
         let after_parse = peak_rss();
 
-        // What the app's pre-flight would compute for every page: the sum of
-        // image XObjects at w*h*4. Cheap (no rendering), so it answers "which
-        // pages would this build actually show?" directly.
+        // What the app's pre-flight (`estimated_page_bytes` + the
+        // `pick_render_scale` retry ladder) would decide for every page:
+        // cheap (no rendering), so it answers "which pages would this build
+        // actually show, and at what scale?" directly. Scale-aware since the
+        // vendored downsample patches make render scale a real cost lever --
+        // a page that doesn't fit at fit-width may still be admitted,
+        // degraded, at fit/2 or fit/4.
         if std::env::var("PROBE_PAGE_BUDGET").is_ok() {
-            let mut over = 0usize;
+            let mut refused = 0usize;
+            let mut degraded = 0usize;
             let mut worst = 0u64;
             let limit: u64 = std::env::var("PROBE_LIMIT_MB").ok()
-                .and_then(|v| v.parse::<u64>().ok()).unwrap_or(24) * 1024 * 1024;
+                .and_then(|v| v.parse::<u64>().ok())
+                .map(|mb| mb * 1024 * 1024)
+                .unwrap_or(MAX_PAGE_RENDER_BYTES);
             for (i, page) in pages.iter().enumerate() {
-                let bytes = page_image_bytes(page);
-                worst = worst.max(bytes);
-                if bytes > limit {
-                    over += 1;
-                    if over <= 6 {
-                        println!("    page {:>3}: {:>7.1} MB of images — REFUSED", i + 1, mb(bytes));
+                let (pw, ph) = page.render_dimensions();
+                let mut fit_scale = if pw > 0.0 { PAGE_WIDTH / pw } else { 1.0 };
+                if ph * fit_scale > MAX_PAGE_HEIGHT {
+                    fit_scale = MAX_PAGE_HEIGHT / ph;
+                }
+                let picked = pick_render_scale(fit_scale, |s| estimated_page_bytes(page, s));
+                match picked {
+                    Some(scale) => {
+                        let bytes = estimated_page_bytes(page, scale);
+                        worst = worst.max(bytes);
+                        if bytes > limit {
+                            // Fits the app's real MAX_PAGE_RENDER_BYTES but
+                            // not this probe's (possibly tighter) PROBE_LIMIT_MB.
+                            refused += 1;
+                            if refused <= 6 {
+                                println!("    page {:>3}: {:>7.1} MB modeled at {:.2}x scale — over PROBE_LIMIT_MB", i + 1, mb(bytes), scale / fit_scale);
+                            }
+                        } else if scale < fit_scale {
+                            degraded += 1;
+                            if degraded <= 6 {
+                                println!("    page {:>3}: {:>7.1} MB modeled — admitted at {:.2}x scale", i + 1, mb(bytes), scale / fit_scale);
+                            }
+                        }
+                    }
+                    None => {
+                        let bytes = estimated_page_bytes(page, fit_scale / 4.0);
+                        worst = worst.max(bytes);
+                        refused += 1;
+                        if refused <= 6 {
+                            println!("    page {:>3}: {:>7.1} MB modeled even at 1/4 scale — REFUSED", i + 1, mb(bytes));
+                        }
                     }
                 }
             }
             println!(
-                "    pages over {} MB: {} of {} (worst page {:.1} MB)",
-                limit / 1024 / 1024, over, pages.len(), mb(worst)
+                "    pages refused: {} of {} (worst page {:.1} MB); pages degraded (reduced scale): {}",
+                refused, pages.len(), mb(worst), degraded
             );
         }
 
         // Per-page sweep: rendering cost is a property of page CONTENT (a
         // full-resolution embedded photo decodes to RGBA regardless of the
         // scale we draw it at), so the worst page is what has to fit, not the
-        // average and not the file size.
+        // average and not the file size. Note this does NOT mirror the app:
+        // it renders every page against ONE parsed `Pdf`, so hayro's
+        // in-`Pdf` retention accumulates across the sweep (the app reparses a
+        // fresh `Pdf` per page -- see `State::data` in src/main.rs). Use
+        // `examples/app_loop_probe.rs` instead for app-faithful peak-RSS
+        // numbers.
         if std::env::var("PROBE_ALL_PAGES").is_ok() {
             let mut worst = (0usize, 0u64);
             let mut prev = after_parse;
@@ -181,7 +256,7 @@ fn main() {
                 );
                 let now = peak_rss();
                 let delta = now.saturating_sub(prev);
-                let imgs = page_image_bytes(page);
+                let imgs = page_image_bytes(page, scale);
                 if delta > worst.1 {
                     worst = (i + 1, delta);
                 }

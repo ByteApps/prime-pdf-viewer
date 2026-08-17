@@ -25,7 +25,11 @@ export global Viewer {
     in property <int> page-num: 0;       // 1-based
     in property <int> page-count: 0;
     in property <string> doc-name: "";
-    in property <length> page-h: 0px;    // rendered page height (logical px)
+    // Display height at PAGE_WIDTH (440 logical px): the Image below is
+    // `width: parent.width; image-fit: fill`, so at a page rendered below
+    // fit-width scale this is the height the narrower pixmap is scaled UP
+    // to, not the pixmap's own height. At fit-width scale the two are equal.
+    in property <length> page-h: 0px;
 }
 
 // Transient UI state: which screen is showing, and the info/error banner.

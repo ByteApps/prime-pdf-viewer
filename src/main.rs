@@ -370,8 +370,10 @@ fn app_main(cx: AppContext, ui: AppWindow) {
 
 /// Budget for rendering ONE page, and the model used to predict it.
 ///
-/// Measured per page with `examples/mem_probe` (`PROBE_ALL_PAGES=1`) against
-/// the 11 MB owner's manual that crashed the device:
+/// PRE-PATCH HISTORY (kept for context, no longer the live model): measured
+/// per page with `examples/mem_probe` (`PROBE_ALL_PAGES=1`) against the 11 MB
+/// owner's manual that crashed the device, BEFORE the vendored hayro
+/// downsample patches (`vendor/hayro-syntax`, `vendor/hayro-interpret`):
 ///
 /// | page | images   | render cost |
 /// |------|----------|-------------|
@@ -380,15 +382,33 @@ fn app_main(cx: AppContext, ui: AppWindow) {
 /// | 5-9  |  1.5 MB  | + 8.1 MB    |
 ///
 /// Two components: a FIXED ~8 MB per page (fonts, content streams, hayro's
-/// per-page state) that appears even on pages with no images at all, plus
-/// roughly 3x the decoded image bytes. Summing image bytes alone was not
+/// per-page state) that appears even on pages with no images at all, plus a
+/// multiple of the decoded image bytes. Summing image bytes alone was not
 /// enough -- it predicted 18 MB for a page that cost 53 MB, and would have
-/// waved this document through.
+/// waved this document through. At that time render SCALE was NOT a lever:
+/// 1/4 scale (16x fewer output pixels) changed the peak by only 4%, because
+/// hayro decoded every image at its NATIVE resolution regardless of how small
+/// it was drawn.
+///
+/// POST-PATCH (current model): the two vendored patches make every raster
+/// image decode toward at most ~2x its DRAWN size (DCTDecode scales at the
+/// syntax level; every other filter is downsampled after decode). Re-measured
+/// on the same manual, page 1 (18.2 MB of dict-modeled image bytes, mostly
+/// small Flate bitmaps) now costs +31 MB to render at fit-width scale -- a
+/// multiplier of ~1.7x on dict-modeled image bytes, down from the pre-patch
+/// ~2.9x. Render scale is now a REAL lever: at half scale, images draw at
+/// half size, so decoded bytes quarter (the old "scale doesn't matter" claim
+/// above is history, not current behaviour). `page_image_bytes` and
+/// `estimated_page_bytes` are scale-aware accordingly, and `show_page` uses
+/// that to retry a too-expensive page at reduced scale instead of refusing
+/// outright.
 const PAGE_RENDER_FIXED_BYTES: u64 = 8 * 1024 * 1024;
 /// Multiplier on decoded image bytes. hayro holds more than one representation
 /// while drawing (decode, colour conversion, scaling), so 4 bytes/pixel of
-/// source image costs ~3x that at peak.
-const PAGE_IMAGE_FACTOR: u64 = 3;
+/// source image costs some multiple of that at peak. Recalibrated from 3 to 2
+/// post-patch: measured ~1.7x on the manual's worst (image-heaviest) page,
+/// plus headroom.
+const PAGE_IMAGE_FACTOR: u64 = 2;
 /// Refuse a page whose predicted cost exceeds this.
 ///
 /// EMPIRICAL, pending device calibration (`pdf-calibration/` on the USB
@@ -408,22 +428,40 @@ fn set_refusal(msg: &str) {
     RENDER_REFUSED.with(|m| *m.borrow_mut() = msg.to_string());
 }
 
-/// Predict what rendering this page will cost: the fixed per-page overhead
-/// plus a multiple of its decoded image bytes. See the constants above for the
-/// measurements behind both terms.
-fn estimated_page_bytes(page: &Page<'_>) -> u64 {
+/// Predict what rendering this page will cost AT THE GIVEN RENDER SCALE: the
+/// fixed per-page overhead plus a multiple of its decoded image bytes. See
+/// the constants above for the measurements behind both terms.
+fn estimated_page_bytes(page: &Page<'_>, scale: f32) -> u64 {
     PAGE_RENDER_FIXED_BYTES
-        .saturating_add(page_image_bytes(page).saturating_mul(PAGE_IMAGE_FACTOR))
+        .saturating_add(page_image_bytes(page, scale).saturating_mul(PAGE_IMAGE_FACTOR))
+}
+
+/// The decode-cost cap the vendored downsample patches guarantee for one
+/// image: it cannot land more than ~2x above `(bound_w, bound_h)`, the size
+/// it's actually drawn at. Cost is `4 bytes/px * min(native area, bound
+/// area)` -- the smaller of "decode this image at its own native resolution"
+/// and "decode it at the bound the patches enforce", since hayro never pays
+/// for more than either.
+fn image_cost_bytes(native_w: u64, native_h: u64, bound_w: u64, bound_h: u64) -> u64 {
+    let native_area = native_w.saturating_mul(native_h);
+    let bound_area = bound_w.saturating_mul(bound_h);
+    4u64.saturating_mul(native_area.min(bound_area))
 }
 
 /// Sum the decoded size of every image a page draws, following Form XObjects.
 ///
 /// Deliberately an OVER-estimate of what hayro will hold: it counts every
-/// image the page references, at 4 bytes per pixel, without deduplicating
-/// repeats. Under-counting here would let through exactly the page that
-/// aborts the process, so the error direction is chosen on purpose.
-fn page_image_bytes(page: &Page<'_>) -> u64 {
-    fn walk(xobjects: &Dict<'_>, depth: u32, total: &mut u64) {
+/// image the page references, without deduplicating repeats, and bounds each
+/// one's decode cost by the whole PAGE's pixmap at this scale (`2 * scale *
+/// render_dimensions`) rather than that image's own placement within the
+/// page -- we don't walk the content stream to know an image's actual drawn
+/// footprint, only that it can't exceed the page it's drawn on. The `2x`
+/// mirrors the vendored patches' own margin: they downsample toward the
+/// drawn size but tolerate up to ~2x that before touching a decode.
+/// Under-counting here would let through exactly the page that aborts the
+/// process, so the error direction is chosen on purpose.
+fn page_image_bytes(page: &Page<'_>, scale: f32) -> u64 {
+    fn walk(xobjects: &Dict<'_>, depth: u32, bound_w: u64, bound_h: u64, total: &mut u64) {
         // Forms can nest; bound the recursion rather than trusting the file.
         if depth > 4 {
             return;
@@ -438,14 +476,12 @@ fn page_image_bytes(page: &Page<'_>) -> u64 {
                 Some(b"Image") => {
                     let w = dict.get::<f32>(b"Width").unwrap_or(0.0).max(0.0) as u64;
                     let h = dict.get::<f32>(b"Height").unwrap_or(0.0).max(0.0) as u64;
-                    // 4 bytes/px: hayro decodes to RGBA8 regardless of the
-                    // source colour space or bit depth.
-                    *total = total.saturating_add(w.saturating_mul(h).saturating_mul(4));
+                    *total = total.saturating_add(image_cost_bytes(w, h, bound_w, bound_h));
                 }
                 Some(b"Form") => {
                     if let Some(res) = dict.get::<Dict<'_>>(b"Resources") {
                         if let Some(inner) = res.get::<Dict<'_>>(b"XObject") {
-                            walk(&inner, depth + 1, total);
+                            walk(&inner, depth + 1, bound_w, bound_h, total);
                         }
                     }
                 }
@@ -454,9 +490,31 @@ fn page_image_bytes(page: &Page<'_>) -> u64 {
         }
     }
 
+    let (pw, ph) = page.render_dimensions();
+    let bound_w = (2.0 * scale * pw).ceil().max(0.0) as u64;
+    let bound_h = (2.0 * scale * ph).ceil().max(0.0) as u64;
+
     let mut total = 0u64;
-    walk(&page.resources().x_objects, 0, &mut total);
+    walk(&page.resources().x_objects, 0, bound_w, bound_h, &mut total);
     total
+}
+
+/// Pick the largest render scale, from `fit_scale` down to `fit_scale / 4` in
+/// halving steps, whose `estimate_fn(scale)` fits `MAX_PAGE_RENDER_BYTES`.
+/// Returns `None` if even the floor (`fit_scale / 4`) doesn't fit -- the
+/// caller refuses the page in that case. Pulled out as a pure function so the
+/// ladder logic is testable without a real `Page`.
+fn pick_render_scale(fit_scale: f32, mut estimate_fn: impl FnMut(f32) -> u64) -> Option<f32> {
+    let mut scale = fit_scale;
+    loop {
+        if estimate_fn(scale) <= MAX_PAGE_RENDER_BYTES {
+            return Some(scale);
+        }
+        if scale <= fit_scale / 4.0 {
+            return None;
+        }
+        scale /= 2.0;
+    }
 }
 
 /// Rasterize the current page fit-to-width and push it into the Viewer global.
@@ -476,42 +534,59 @@ fn show_page(ui: &AppWindow, st: &State) -> bool {
     }
     let page = &pages[st.page_idx];
 
-    // Pre-flight: refuse a page we cannot afford to draw, BEFORE hayro tries.
-    // A file-size cap cannot catch this -- an 11 MB manual needs ~54-87 MB for
-    // page 1 while a 13 MB image PDF needs ~50 MB -- because the cost is the
-    // page's images decoded at NATIVE resolution, which no render scale
-    // reduces (verified: 1/4 scale changed the peak by 4%).
-    let predicted = estimated_page_bytes(page);
-    if predicted > MAX_PAGE_RENDER_BYTES {
-        log::warn!(
-            "page {} needs ~{} to render (limit {})",
-            st.page_idx + 1,
-            human_size(predicted),
-            human_size(MAX_PAGE_RENDER_BYTES)
-        );
-        let msg = format!(
-            "Page {} is too detailed to display (needs ~{}).",
-            st.page_idx + 1,
-            human_size(predicted)
-        );
-        set_refusal(&msg);
-        // Keep the document open on a refused page: the rest of it is usually
-        // fine (290 of the crashing manual's 291 pages cost ~8 MB), so the
-        // reader can page past this one instead of being thrown out.
-        let viewer = ui.global::<Viewer>();
-        viewer.set_page_img(Image::default());
-        viewer.set_page_h(0.0);
-        viewer.set_page_message(msg.into());
-        viewer.set_page_num(st.page_idx as i32 + 1);
-        viewer.set_page_count(count as i32);
-        viewer.set_doc_name(st.doc_name.clone().into());
-        return false;
+    let (pw, ph) = page.render_dimensions();
+    let mut fit_scale = if pw > 0.0 { PAGE_WIDTH / pw } else { 1.0 };
+    if ph * fit_scale > MAX_PAGE_HEIGHT {
+        fit_scale = MAX_PAGE_HEIGHT / ph;
     }
 
-    let (pw, ph) = page.render_dimensions();
-    let mut scale = if pw > 0.0 { PAGE_WIDTH / pw } else { 1.0 };
-    if ph * scale > MAX_PAGE_HEIGHT {
-        scale = MAX_PAGE_HEIGHT / ph;
+    // Pre-flight: refuse a page we cannot afford to draw, BEFORE hayro tries.
+    // A file-size cap cannot catch this -- an 11 MB manual needs ~54-87 MB for
+    // page 1 while a 13 MB image PDF needs ~50 MB. Since the vendored hayro
+    // patches bound every image's decode to ~2x its DRAWN size, render scale
+    // is now a real lever (unlike before those patches, where 1/4 scale
+    // changed the peak by only 4%): retry at half, then quarter, fit-width
+    // scale before giving up.
+    let scale = match pick_render_scale(fit_scale, |s| estimated_page_bytes(page, s)) {
+        Some(s) => s,
+        None => {
+            let predicted = estimated_page_bytes(page, fit_scale / 4.0);
+            log::warn!(
+                "page {} needs ~{} to render even at 1/4 scale (limit {})",
+                st.page_idx + 1,
+                human_size(predicted),
+                human_size(MAX_PAGE_RENDER_BYTES)
+            );
+            let msg = format!(
+                "Page {} is too detailed to display (needs ~{}).",
+                st.page_idx + 1,
+                human_size(predicted)
+            );
+            set_refusal(&msg);
+            // Keep the document open on a refused page: the rest of it is
+            // usually fine (290 of the crashing manual's 291 pages cost ~8
+            // MB), so the reader can page past this one instead of being
+            // thrown out.
+            let viewer = ui.global::<Viewer>();
+            viewer.set_page_img(Image::default());
+            viewer.set_page_h(0.0);
+            viewer.set_page_message(msg.into());
+            viewer.set_page_num(st.page_idx as i32 + 1);
+            viewer.set_page_count(count as i32);
+            viewer.set_doc_name(st.doc_name.clone().into());
+            return false;
+        }
+    };
+    if scale < fit_scale {
+        // Log contract: "page {n} degraded to {frac}x scale (~{bytes}
+        // modeled)", frac formatted to 2 decimals (0.50, 0.25) relative to
+        // fit-width scale.
+        log::info!(
+            "page {} degraded to {:.2}x scale (~{} modeled)",
+            st.page_idx + 1,
+            scale / fit_scale,
+            human_size(estimated_page_bytes(page, scale))
+        );
     }
 
     // Drop the page currently on screen BEFORE rasterizing the next one.
@@ -557,13 +632,28 @@ fn show_page(ui: &AppWindow, st: &State) -> bool {
     let mut buf = SharedPixelBuffer::<Rgba8Pixel>::new(w, h);
     buf.make_mut_bytes().copy_from_slice(pix.data_as_u8_slice());
 
+    // The Slint side maps pixmap pixels 1:1 (Image is `width: parent.width;
+    // image-fit: fill`, and `page_h` sets its height directly). At a
+    // degraded (< fit-width) scale the pixmap is narrower than PAGE_WIDTH,
+    // so `page_h` must be the DISPLAY height the pixmap scales UP to at
+    // PAGE_WIDTH, not the pixmap's own height -- otherwise a degraded page
+    // renders squashed. At fit-width scale (pixmap_w == PAGE_WIDTH) this is a
+    // no-op.
+    let display_h = if w > 0 {
+        h as f32 * (PAGE_WIDTH / w as f32)
+    } else {
+        h as f32
+    };
+
     let viewer = ui.global::<Viewer>();
     viewer.set_page_message("".into());
     viewer.set_page_img(Image::from_rgba8_premultiplied(buf));
-    viewer.set_page_h(h as f32);
+    viewer.set_page_h(display_h);
     viewer.set_page_num(st.page_idx as i32 + 1);
     viewer.set_page_count(count as i32);
     viewer.set_doc_name(st.doc_name.clone().into());
+    // Log contract: keeps logging the PIXMAP dims (w x h), not the display
+    // size -- ../ui-automation/tests/view-pdf.sh greps this line.
     log::info!("rendered page {}/{} {}x{}", st.page_idx + 1, count, w, h);
     true
 }
@@ -660,5 +750,80 @@ fn err_msg(e: &fs::Error) -> String {
         FileInUse => "File is in use".to_string(),
         InvalidPath => "Invalid name".to_string(),
         other => format!("Error: {other:?}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // -- image_cost_bytes -----------------------------------------------
+
+    #[test]
+    fn image_cost_native_smaller_than_bound_wins() {
+        // A small native image inside a page bound far larger than it: the
+        // cost should be the native size, not the bound.
+        let cost = image_cost_bytes(100, 100, 10_000, 10_000);
+        assert_eq!(cost, 4 * 100 * 100);
+    }
+
+    #[test]
+    fn image_cost_bound_smaller_than_native_wins() {
+        // A huge native image drawn small: the vendored patches cap its
+        // decode near the bound, so the bound should win.
+        let cost = image_cost_bytes(4000, 3000, 200, 150);
+        assert_eq!(cost, 4 * 200 * 150);
+    }
+
+    #[test]
+    fn image_cost_equal_dimensions_either_bound_works() {
+        let cost = image_cost_bytes(500, 500, 500, 500);
+        assert_eq!(cost, 4 * 500 * 500);
+    }
+
+    // -- pick_render_scale ------------------------------------------------
+
+    #[test]
+    fn pick_render_scale_fits_at_full_scale() {
+        // Cheap page: fits without any degradation.
+        let got = pick_render_scale(1.0, |_s| 1_000);
+        assert_eq!(got, Some(1.0));
+    }
+
+    #[test]
+    fn pick_render_scale_degrades_to_half_when_only_half_fits() {
+        // DISCRIMINATING: an estimate that only fits at fit/2 must yield
+        // exactly fit/2 -- this fails if the ladder skips a step, or if the
+        // estimate function isn't actually scale-aware (a constant estimate
+        // would either always pass or always fail, never split like this).
+        let fit = 1.0f32;
+        let got = pick_render_scale(fit, |s| {
+            if s <= fit / 2.0 + f32::EPSILON {
+                MAX_PAGE_RENDER_BYTES // exactly at the limit: fits
+            } else {
+                MAX_PAGE_RENDER_BYTES + 1 // over the limit: refused
+            }
+        });
+        assert_eq!(got, Some(0.5));
+    }
+
+    #[test]
+    fn pick_render_scale_degrades_to_quarter_when_only_quarter_fits() {
+        let fit = 2.0f32;
+        let got = pick_render_scale(fit, |s| {
+            if s <= fit / 4.0 + f32::EPSILON {
+                MAX_PAGE_RENDER_BYTES
+            } else {
+                MAX_PAGE_RENDER_BYTES + 1
+            }
+        });
+        assert_eq!(got, Some(0.5)); // fit/4 == 0.5
+    }
+
+    #[test]
+    fn pick_render_scale_refuses_when_floor_still_too_big() {
+        // Nothing in the ladder ever fits: refuse.
+        let got = pick_render_scale(1.0, |_s| MAX_PAGE_RENDER_BYTES + 1);
+        assert_eq!(got, None);
     }
 }
