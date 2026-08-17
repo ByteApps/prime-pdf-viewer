@@ -9,6 +9,7 @@ use hayro::hayro_interpret::hayro_syntax::object::{Dict, Stream};
 use hayro::hayro_interpret::hayro_syntax::page::Page;
 use hayro::hayro_interpret::hayro_syntax::Pdf;
 use hayro::hayro_interpret::InterpreterSettings;
+use hayro::vello_cpu::color::palette::css::WHITE;
 use hayro::{render, RenderCache, RenderSettings};
 use slint_keyos_platform::app_ui2;
 use slint_keyos_platform::fs::{self, Location, OpenFlags};
@@ -445,6 +446,12 @@ fn show_page(ui: &AppWindow, st: &State) -> bool {
             &RenderSettings {
                 x_scale: scale,
                 y_scale: scale,
+                // Paper is white. hayro's default bg_color is TRANSPARENT
+                // (0.4 rendered opaque, 0.7 does not), which composited the
+                // page over the app's dark surface and made scanned/vector
+                // pages look inverted. Set it explicitly so the page looks the
+                // same whatever the library's default does next.
+                bg_color: WHITE,
                 ..Default::default()
             },
         )
