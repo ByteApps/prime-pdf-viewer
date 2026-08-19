@@ -38,7 +38,7 @@ If this app is useful to you, a small bitcoin donation is always appreciated —
 
 <img src="donate-qr.png" alt="Donate bitcoin" width="200">
 
-**`bc1qrfagrsfrm8erdsmrku3fgq5yc573zyp2q3uje8`**
+**`bc1qkmg7qek6vuuw6hqp9sm06krzcr7pwd5jhcr43f`**
 
 </div>
 
