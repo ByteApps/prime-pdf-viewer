@@ -46,3 +46,10 @@ kurbo = "0.13"
 [patch.crates-io]
 hayro-syntax = { path = "vendor/hayro-syntax" }
 hayro-interpret = { path = "vendor/hayro-interpret" }
+# Vendored jpeg-decoder 0.3.2 (reached via hayro-syntax's scaled-DCT patch)
+# with ONE fix, byte-identical to prime-image-viewer's copy: never select the
+# mpsc worker on KeyOS -- its UNBOUNDED channels queue every coefficient row
+# when the single-core producer outruns the worker threads (~3 bytes/pixel)
+# and OOM the Prime's 128 MB pool with an uncatchable crash. Found
+# 2026-08-19 via prime-image-viewer's img-6000.jpg calibration crash.
+jpeg-decoder = { path = "vendor/jpeg-decoder" }
