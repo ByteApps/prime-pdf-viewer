@@ -52,5 +52,7 @@ hayro-interpret = { path = "vendor/hayro-interpret" }
 # when the single-core producer outruns the worker threads (~3 bytes/pixel)
 # and OOM the Prime's 128 MB pool with an uncatchable crash. Found
 # 2026-08-19 via prime-image-viewer's img-6000.jpg calibration crash;
-# filed upstream: image-rs/jpeg-decoder#290.
+# upstream image-rs/jpeg-decoder#290 CLOSED won't-fix (maintenance-mode);
+# patch is PERMANENT. zune-jpeg has no reduced-IDCT scaled decode
+# (etemesi254/zune-image#434, open), so it is not a replacement.
 jpeg-decoder = { path = "vendor/jpeg-decoder" }
